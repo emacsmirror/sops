@@ -89,5 +89,81 @@ plaintext'.  Leading/trailing whitespace in JSON-STRING is trimmed."
         (eq t (cdr (assq 'encrypted parsed))))
     (error nil)))
 
+(defcustom sops-executable "sops"
+  "Path to the sops binary.  Looked up via `executable-find' if not absolute."
+  :type 'string
+  :group 'sops)
+
+(defun sops--run (args &rest keys)
+  "Run sops with ARGS.
+Keyword args:
+  :input STRING  -- pipe STRING to sops's stdin
+  :filter FN     -- process filter (nil in v0.2; populated in future work)
+Return plist (:exit-status N :stdout STR :stderr STR)."
+  (let* ((input (plist-get keys :input))
+         (filter (plist-get keys :filter))
+         (stdout-buf (generate-new-buffer " *sops-stdout*" t))
+         (stderr-buf (generate-new-buffer " *sops-stderr*" t))
+         (done nil)
+         (proc nil))
+    (unwind-protect
+        (let ((process-environment
+               (cons "SOPS_DISABLE_VERSION_CHECK=true" process-environment)))
+          (setq proc
+                (make-process
+                 :name "sops"
+                 :buffer stdout-buf
+                 :stderr stderr-buf
+                 :command (cons sops-executable args)
+                 :connection-type 'pipe
+                 :filter filter
+                 :sentinel (lambda (_p _event) (setq done t))))
+          ;; Force utf-8-unix on both ends.  Sops emits text (YAML/JSON/ENV/INI
+          ;; with base64-encoded ENC[...] strings); locking the coding system
+          ;; prevents CRLF translation on Windows-built Emacs from corrupting
+          ;; the encrypted blob round-trip.
+          (set-process-coding-system proc 'utf-8-unix 'utf-8-unix)
+          (when input
+            (process-send-string proc input)
+            (process-send-eof proc))
+          ;; This loop blocks the Emacs main thread until sops exits.  C-g
+          ;; works (accept-process-output respects quit-flag), but sops calls
+          ;; that hang waiting for interactive input (yubikey touch, age PIN)
+          ;; freeze the UI until C-g.  future work adds a process :filter that
+          ;; watches stderr for known prompts and responds via process-send-string;
+          ;; that's the architectural fix.
+          (while (not done)
+            ;; 100 ms timeout balances UI responsiveness for fast commands
+            ;; (--version, filestatus) against CPU spin for slow ones (decrypt).
+            (accept-process-output proc 0.1))
+          (list :exit-status (process-exit-status proc)
+                :stdout (with-current-buffer stdout-buf (buffer-string))
+                :stderr (with-current-buffer stderr-buf (buffer-string))))
+      (when (and proc (process-live-p proc))
+        (delete-process proc))
+      (when (buffer-live-p stdout-buf) (kill-buffer stdout-buf))
+      (when (buffer-live-p stderr-buf) (kill-buffer stderr-buf)))))
+
+(defvar sops--version-cache nil
+  "Cons of (PATH . VERSION-STRING) cached after first successful sops --version.
+Recomputed when `sops-executable' changes or path is otherwise different.")
+
+(defun sops--ensure-version ()
+  "Verify sops binary exists and is >= 3.9.0.  Return version string.
+Signals `user-error' if sops is missing or too old.  Caches result."
+  (when (or (null sops--version-cache)
+            (not (equal (car sops--version-cache) sops-executable)))
+    (unless (executable-find sops-executable)
+      (user-error "sops: executable not found: %s" sops-executable))
+    (let* ((result (sops--run '("--version")))
+           (out (plist-get result :stdout))
+           (version (when (string-match "[0-9]+\\.[0-9]+\\.[0-9]+" out)
+                      (match-string 0 out))))
+      (unless (and version (version<= "3.9.0" version))
+        (user-error "sops: requires >= 3.9.0, found %s"
+                    (or version "unknown")))
+      (setq sops--version-cache (cons sops-executable version))))
+  (cdr sops--version-cache))
+
 (provide 'sops)
 ;;; sops.el ends here

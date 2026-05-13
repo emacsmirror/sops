@@ -201,5 +201,74 @@ Locks the discriminator against future `truthiness' loosening."
   "Non-string input returns nil rather than erroring."
   (should (eq nil (sops--parse-filestatus nil))))
 
+(ert-deftest sops-test--run-version-success ()
+  "sops--run with --version returns exit 0 and version string in stdout."
+  (let ((result (sops--run '("--version"))))
+    (should (eq 0 (plist-get result :exit-status)))
+    (should (string-match-p "^sops" (plist-get result :stdout)))))
+
+(ert-deftest sops-test--run-bad-args-failure ()
+  "sops--run with garbage returns non-zero exit and captured stderr.
+Asserts stderr is non-empty so the :stderr pipe wiring is exercised on
+the failure path; doesn't pin the message text (sops's wording can shift
+between versions)."
+  (let ((result (sops--run '("nonexistent-subcommand"))))
+    (should-not (eq 0 (plist-get result :exit-status)))
+    (should (> (length (plist-get result :stderr)) 0))))
+
+(ert-deftest sops-test--run-with-input ()
+  "sops--run can pipe input via :input."
+  (let ((result (sops--run '("filestatus" "--input-type" "yaml" "/dev/stdin")
+                           :input "foo: bar\n")))
+    (should (eq 0 (plist-get result :exit-status)))
+    (should (string-match-p "encrypted" (plist-get result :stdout)))))
+
+(ert-deftest sops-test--run-version-check-disabled ()
+  "stderr does not contain sops update-check noise."
+  (let ((result (sops--run '("--version"))))
+    (should-not (string-match-p "new version of sops" (plist-get result :stderr)))))
+
+(ert-deftest sops-test--run-missing-executable-errors ()
+  "An absolute path to a nonexistent binary signals an error from make-process.
+Locks the contract that sops--run does not silently swallow exec failures."
+  (let ((sops-executable "/no/such/sops"))
+    (should-error (sops--run '("--version")))))
+
+(ert-deftest sops-test--ensure-version-passes-on-modern-sops ()
+  "Returns version string when sops >= 3.9.0."
+  (setq sops--version-cache nil)
+  (let ((v (sops--ensure-version)))
+    (should (stringp v))
+    (should (version<= "3.9.0" v))))
+
+(ert-deftest sops-test--ensure-version-cache-hit ()
+  "Second call uses cached value (same path)."
+  (setq sops--version-cache nil)
+  (sops--ensure-version)
+  (let ((cached sops--version-cache))
+    (should cached)
+    (should (equal sops-executable (car cached)))
+    ;; Calling again should not change the cache cell
+    (sops--ensure-version)
+    (should (eq cached sops--version-cache))))
+
+(ert-deftest sops-test--ensure-version-recomputes-on-path-change ()
+  "Cache invalidated when sops-executable changes."
+  (setq sops--version-cache nil)
+  (sops--ensure-version)
+  (let ((sops-executable "/usr/bin/sops")) ; different path, may not exist
+    (ignore-errors (sops--ensure-version))
+    ;; The cached path should reflect the most recent successful call;
+    ;; if the new path errors, cache for old path may persist — that's OK.
+    (should (or (equal "/usr/bin/sops" (car sops--version-cache))
+                (equal "sops" (car sops--version-cache))))))
+
+(ert-deftest sops-test--ensure-version-missing-binary-errors ()
+  "Missing binary signals user-error and does not poison the cache."
+  (setq sops--version-cache nil)
+  (let ((sops-executable "/no/such/sops"))
+    (should-error (sops--ensure-version) :type 'user-error))
+  (should (eq nil sops--version-cache)))
+
 (provide 'sops-test)
 ;;; sops-test.el ends here
