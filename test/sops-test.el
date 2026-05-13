@@ -327,5 +327,217 @@ lookup."
       (should-not (string-match-p "first error" (buffer-string))))
     (kill-buffer buf-name)))
 
+(ert-deftest sops-test--decrypt-buffer-success ()
+  "Decrypts a fixture into the buffer; returns t."
+  (let ((file (sops-test--fixture "secrets.enc.yaml")))
+    (with-temp-buffer
+      (setq buffer-file-name file)
+      (insert-file-contents file)
+      (should (eq t (sops--decrypt-buffer)))
+      (should (string-match-p "database_password: super-secret-yaml"
+                              (buffer-string)))
+      (should-not (buffer-modified-p)))))
+
+(ert-deftest sops-test--decrypt-buffer-failure-pops-error ()
+  "Bad auth: returns nil, buffer unchanged, error buffer popped, hook still fired.
+The hook firing before sops--run is part of the contract: users set env
+vars in the hook expecting they take effect on every attempt, not only
+on attempts that succeed."
+  (let* ((file (sops-test--fixture "secrets.enc.yaml"))
+         (orig (with-temp-buffer (insert-file-contents file) (buffer-string)))
+         (buf-name (format "*sops-error: %s*" file))
+         (hook-fired nil)
+         (sops-before-decrypt-hook
+          (list (lambda () (setq hook-fired t)))))
+    (when (get-buffer buf-name) (kill-buffer buf-name))
+    (with-temp-buffer
+      (setq buffer-file-name file)
+      (insert-file-contents file)
+      (let ((process-environment
+             (cons "SOPS_AGE_KEY_FILE=/tmp/nonexistent-key" process-environment)))
+        (should (eq nil (sops--decrypt-buffer))))
+      (should (equal orig (buffer-string))))
+    (should hook-fired)
+    (should (get-buffer buf-name))
+    (kill-buffer buf-name)))
+
+(ert-deftest sops-test--decrypt-buffer-runs-before-decrypt-hook ()
+  "sops-before-decrypt-hook runs before decrypt with buffer-file-name set."
+  (let* ((file (sops-test--fixture "secrets.enc.yaml"))
+         (called nil)
+         (sops-before-decrypt-hook
+          (list (lambda () (setq called buffer-file-name)))))
+    (with-temp-buffer
+      (setq buffer-file-name file)
+      (insert-file-contents file)
+      (sops--decrypt-buffer)
+      (should (equal file called)))))
+
+(ert-deftest sops-test--encrypt-and-write-roundtrip ()
+  "Decrypt → modify → encrypt-and-write → re-decrypt matches modified content.
+The temp file lives inside `sops-test--fixtures' so sops can locate the
+fixture's `.sops.yaml' by walking up from cwd.  `default-directory' is
+set explicitly in each `with-temp-buffer' because `with-temp-buffer'
+doesn't auto-set it the way `find-file' does in production."
+  (sops-test--ensure-fixtures)
+  (let* ((src (sops-test--fixture "secrets.enc.yaml"))
+         (tmp (make-temp-file
+               (expand-file-name "sops-test-roundtrip-" sops-test--fixtures)
+               nil ".enc.yaml")))
+    (unwind-protect
+        (progn
+          (copy-file src tmp t)
+          (with-temp-buffer
+            (setq buffer-file-name tmp)
+            (setq default-directory (file-name-directory tmp))
+            (insert-file-contents tmp)
+            (sops--decrypt-buffer)
+            (goto-char (point-max))
+            (insert "added_line: roundtrip-value\n")
+            (let ((write-result (sops--encrypt-and-write)))
+              (should (eq t write-result))))
+          (with-temp-buffer
+            (setq buffer-file-name tmp)
+            (setq default-directory (file-name-directory tmp))
+            (insert-file-contents tmp)
+            (sops--decrypt-buffer)
+            (should (string-match-p "added_line: roundtrip-value"
+                                    (buffer-string)))))
+      (delete-file tmp))))
+
+(ert-deftest sops-test--encrypt-and-write-failure-leaves-file-untouched ()
+  "When sops encrypt fails, target file is unchanged."
+  (let* ((src (sops-test--fixture "secrets.enc.yaml"))
+         (tmp (make-temp-file "sops-test-encfail-" nil ".enc.yaml"))
+         (orig nil))
+    (unwind-protect
+        (progn
+          (copy-file src tmp t)
+          (setq orig (with-temp-buffer (insert-file-contents tmp) (buffer-string)))
+          (with-temp-buffer
+            (setq buffer-file-name tmp)
+            (insert "plain content with no .sops.yaml rule for /tmp\n")
+            (let ((process-environment
+                   (cons "SOPS_AGE_KEY_FILE=/tmp/nonexistent" process-environment)))
+              (should-error (sops--encrypt-and-write) :type 'user-error)))
+          (should (equal orig (with-temp-buffer
+                                (insert-file-contents tmp)
+                                (buffer-string)))))
+      (delete-file tmp))))
+
+(ert-deftest sops-test--encrypt-and-write-runs-before-encrypt-hook ()
+  "sops-before-encrypt-hook fires before encrypt with buffer-file-name set.
+See `sops-test--encrypt-and-write-roundtrip' for the explanation of why
+the temp file lives in `sops-test--fixtures' and why `default-directory'
+is set explicitly."
+  (sops-test--ensure-fixtures)
+  (let* ((src (sops-test--fixture "secrets.enc.yaml"))
+         (tmp (make-temp-file
+               (expand-file-name "sops-test-hook-" sops-test--fixtures)
+               nil ".enc.yaml"))
+         (called nil)
+         (sops-before-encrypt-hook
+          (list (lambda () (setq called buffer-file-name)))))
+    (unwind-protect
+        (progn
+          (copy-file src tmp t)
+          (with-temp-buffer
+            (setq buffer-file-name tmp)
+            (setq default-directory (file-name-directory tmp))
+            (insert-file-contents tmp)
+            (sops--decrypt-buffer)
+            (sops--encrypt-and-write)
+            (should (equal tmp called))))
+      (delete-file tmp))))
+
+(ert-deftest sops-test--encrypt-and-write-widens-narrowed-buffer ()
+  "Encrypt-and-write writes the full buffer even when the buffer is narrowed.
+A narrowed `(point-min)..(point-max)' would otherwise truncate the
+encrypted file to just the visible region -- silent data loss."
+  (sops-test--ensure-fixtures)
+  (let* ((src (sops-test--fixture "secrets.enc.yaml"))
+         (tmp (make-temp-file
+               (expand-file-name "sops-test-narrow-" sops-test--fixtures)
+               nil ".enc.yaml")))
+    (unwind-protect
+        (progn
+          (copy-file src tmp t)
+          (with-temp-buffer
+            (setq buffer-file-name tmp)
+            (setq default-directory (file-name-directory tmp))
+            (insert-file-contents tmp)
+            (sops--decrypt-buffer)
+            (goto-char (point-max))
+            (insert "outside_narrow: should-survive\n")
+            ;; Narrow to the first line; without `widen' the encrypt
+            ;; would only see that line and clobber the rest.
+            (goto-char (point-min))
+            (narrow-to-region (point-min) (line-end-position))
+            (sops--encrypt-and-write))
+          (with-temp-buffer
+            (setq buffer-file-name tmp)
+            (setq default-directory (file-name-directory tmp))
+            (insert-file-contents tmp)
+            (sops--decrypt-buffer)
+            (should (string-match-p "outside_narrow: should-survive"
+                                    (buffer-string)))))
+      (delete-file tmp))))
+
+(ert-deftest sops-test--encrypt-and-write-suppresses-backup ()
+  "Save creates no backup file even when `make-backup-files' is t."
+  (sops-test--ensure-fixtures)
+  (let* ((src (sops-test--fixture "secrets.enc.yaml"))
+         (tmp (make-temp-file
+               (expand-file-name "sops-test-backup-" sops-test--fixtures)
+               nil ".enc.yaml"))
+         (backup (concat tmp "~"))
+         ;; Force-enable backups globally; the helper should still suppress.
+         (make-backup-files t))
+    (unwind-protect
+        (progn
+          (copy-file src tmp t)
+          (with-temp-buffer
+            (setq buffer-file-name tmp)
+            (setq default-directory (file-name-directory tmp))
+            (insert-file-contents tmp)
+            (sops--decrypt-buffer)
+            (goto-char (point-max))
+            (insert "added: 1\n")
+            (sops--encrypt-and-write))
+          (should-not (file-exists-p backup)))
+      (when (file-exists-p backup) (delete-file backup))
+      (delete-file tmp))))
+
+(ert-deftest sops-test--encrypt-and-write-passes-extra-encrypt-args ()
+  "Items in `sops-extra-encrypt-args' appear in the sops invocation.
+Stubs `sops--run' so we can lock the wiring without depending on a
+specific sops flag being a no-op for encrypt."
+  (let* ((tmp (make-temp-file "sops-test-extra-" nil ".enc.yaml"))
+         (sops-extra-encrypt-args '("-a" "age1stub"))
+         (captured-args nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'sops--run)
+                   (lambda (args &rest _keys)
+                     (setq captured-args args)
+                     (list :exit-status 0
+                           :stdout "stub-ciphertext\n"
+                           :stderr ""))))
+          (with-temp-buffer
+            (setq buffer-file-name tmp)
+            (insert "plaintext\n")
+            (sops--encrypt-and-write))
+          ;; Both extra-args land between --filename-override and /dev/stdin.
+          (should (member "-a" captured-args))
+          (should (member "age1stub" captured-args))
+          (should (equal "/dev/stdin" (car (last captured-args))))
+          ;; Order: -a comes before age1stub (preserved from input list).
+          (let ((dash-a-pos (cl-position "-a" captured-args :test #'equal))
+                (stub-pos (cl-position "age1stub" captured-args :test #'equal))
+                (stdin-pos (cl-position "/dev/stdin" captured-args :test #'equal)))
+            (should (and dash-a-pos stub-pos stdin-pos))
+            (should (< dash-a-pos stub-pos))
+            (should (< stub-pos stdin-pos))))
+      (when (file-exists-p tmp) (delete-file tmp)))))
+
 (provide 'sops-test)
 ;;; sops-test.el ends here

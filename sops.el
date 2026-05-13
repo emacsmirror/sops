@@ -207,5 +207,98 @@ displayed buffer."
     (display-buffer buf)
     buf))
 
+(defcustom sops-decrypt-args '("decrypt")
+  "Arguments to sops for decrypt (the file path is appended)."
+  :type '(repeat string)
+  :group 'sops)
+
+(defcustom sops-extra-encrypt-args nil
+  "Additional arguments inserted before the trailing /dev/stdin in encrypt.
+Example for age SSH: \\='(\"-a\" \"<ssh-key>\")."
+  :type '(repeat string)
+  :group 'sops)
+
+(defcustom sops-before-decrypt-hook nil
+  "Hook run before each sops decrypt invocation.
+Runs in the buffer being decrypted; `buffer-file-name' is the
+encrypted file's path.  Use to set `AWS_PROFILE', age key paths, etc.
+The hook fires unconditionally before `sops--run', regardless of
+whether the subsequent decrypt succeeds."
+  :type 'hook
+  :group 'sops)
+
+(defcustom sops-before-encrypt-hook nil
+  "Hook run before each sops encrypt invocation.
+Runs in the buffer being encrypted; `buffer-file-name' is the
+target file's path.  Use to set `AWS_PROFILE', age key paths, etc.
+The hook fires unconditionally before `sops--run'."
+  :type 'hook
+  :group 'sops)
+
+(defun sops--decrypt-buffer ()
+  "Decrypt current buffer's file via sops, replacing buffer contents.
+Return t on success, nil on failure (popping an error buffer).
+Caller must have set `buffer-file-name' to the encrypted file path."
+  (run-hooks 'sops-before-decrypt-hook)
+  (let* ((file buffer-file-name)
+         (input-type (sops--input-type-for file))
+         (args (append sops-decrypt-args
+                       (when input-type (list "--input-type" input-type))
+                       (list file)))
+         (result (sops--run args))
+         (exit (plist-get result :exit-status)))
+    (if (eq 0 exit)
+        (progn
+          (let ((inhibit-read-only t))
+            (erase-buffer)
+            (insert (plist-get result :stdout)))
+          (set-buffer-modified-p nil)
+          ;; Re-detect major mode against the now-decrypted plaintext, but
+          ;; via `set-auto-mode' (extension/auto-mode-alist only) rather
+          ;; than `normal-mode' which would also process file-local
+          ;; variables and `-*- eval: ... -*-' cookies.  The decrypted
+          ;; content is not from a trusted source -- a third party with
+          ;; write access to the ciphertext could embed malicious
+          ;; cookies that `normal-mode' would honor at decrypt time.
+          (set-auto-mode)
+          t)
+      (sops--popup-error file args exit (plist-get result :stderr))
+      nil)))
+
+(defun sops--encrypt-and-write ()
+  "Encrypt current buffer via sops and write to `buffer-file-name'.
+Return t on success.  Signals `user-error' on failure (aborts save).
+
+Reads the full buffer (widened) so a narrowed buffer isn't silently
+truncated on save.  Suppresses backups (`make-backup-files') around
+the write because ciphertext backups accumulate without recovery
+value -- the user can't usefully edit them manually."
+  (run-hooks 'sops-before-encrypt-hook)
+  (let* ((file buffer-file-name)
+         (input-type (sops--input-type-for file))
+         (args (append '("encrypt" "--filename-override")
+                       (list file)
+                       (when input-type (list "--input-type" input-type))
+                       sops-extra-encrypt-args
+                       '("/dev/stdin")))
+         (result (sops--run args :input (save-restriction
+                                          (widen)
+                                          (buffer-substring-no-properties
+                                           (point-min) (point-max)))))
+         (exit (plist-get result :exit-status))
+         (stdout (plist-get result :stdout)))
+    (cond
+     ((not (eq 0 exit))
+      (sops--popup-error file args exit (plist-get result :stderr))
+      (user-error "sops encrypt failed (exit %d)" exit))
+     ((zerop (length stdout))
+      (sops--popup-error file args exit "sops: encrypt produced empty output\n")
+      (user-error "sops encrypt produced empty output")))
+    (let ((coding-system-for-write 'no-conversion)
+          (make-backup-files nil))
+      (write-region stdout nil file nil 'silent))
+    (set-buffer-modified-p nil)
+    t))
+
 (provide 'sops)
 ;;; sops.el ends here
