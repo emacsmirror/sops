@@ -272,7 +272,14 @@ Return t on success.  Signals `user-error' on failure (aborts save).
 Reads the full buffer (widened) so a narrowed buffer isn't silently
 truncated on save.  Suppresses backups (`make-backup-files') around
 the write because ciphertext backups accumulate without recovery
-value -- the user can't usefully edit them manually."
+value -- the user can't usefully edit them manually.
+
+After `write-region', refreshes `visited-file-modtime' so Emacs's
+modtime check (used by `verify-visited-file-modtime') matches the
+file we just wrote.  Without this, the next edit triggers a
+\"FILE has changed on disk; really edit the buffer?\" prompt
+because `find-file' recorded the *encrypted* file's modtime and
+our write replaced it."
   (run-hooks 'sops-before-encrypt-hook)
   (let* ((file buffer-file-name)
          (input-type (sops--input-type-for file))
@@ -297,6 +304,7 @@ value -- the user can't usefully edit them manually."
     (let ((coding-system-for-write 'no-conversion)
           (make-backup-files nil))
       (write-region stdout nil file nil 'silent))
+    (set-visited-file-modtime)
     (set-buffer-modified-p nil)
     t))
 
@@ -312,9 +320,23 @@ Returns t when save was handled (skipping normal write); signals user-error on f
   "Revert function for sops-mode buffers: re-read encrypted file and decrypt.
 Widens before erasing so a narrowed buffer doesn't corrupt itself with
 mixed encrypted + plaintext content (parallels the narrowing defense
-in `sops--encrypt-and-write')."
+in `sops--encrypt-and-write').
+
+Refreshes `visited-file-modtime' BEFORE `erase-buffer'.  Two reasons:
+
+  1. After the revert, `verify-visited-file-modtime' must return t
+     so the next keystroke doesn't re-fire the \"FILE has changed on
+     disk\" prompt.
+
+  2. `erase-buffer' triggers Emacs's lock-file path which calls
+     `ask-user-about-supersession-threat' if the modtime is stale.
+     In batch mode that errors out (\"Cannot resolve conflict in
+     batch mode\"); interactively it would re-fire the supersession
+     prompt mid-revert.  Updating the recorded modtime first
+     suppresses the check because the buffer now \"agrees\" with disk."
   (save-restriction
     (widen)
+    (set-visited-file-modtime)
     (let ((inhibit-read-only t))
       (erase-buffer)
       (insert-file-contents buffer-file-name)))
@@ -336,15 +358,39 @@ Plaintext never reaches disk (backups and auto-save are suppressed)."
     (setq-local make-backup-files nil)
     (setq-local buffer-auto-save-file-name nil)
     (setq-local revert-buffer-function #'sops--revert-buffer)
-    (add-hook 'write-contents-functions #'sops--write-contents-function nil t))
+    (add-hook 'write-contents-functions #'sops--write-contents-function nil t)
+    ;; External writes (magit discard, git checkout, sops -e from CLI) update
+    ;; the file behind our back.  auto-revert-mode polls the modtime and
+    ;; calls `revert-buffer-function' (= `sops--revert-buffer') when it
+    ;; changes -- so the user sees the new ciphertext re-decrypted instead
+    ;; of a stale buffer + the "really edit?" prompt.
+    ;;
+    ;; Disable file-notify (kqueue/inotify) and rely on polling: file-notify
+    ;; fires asynchronously inside `accept-process-output', which is exactly
+    ;; the blocking-loop primitive `sops--run' uses to wait for sops -- so a
+    ;; notify-driven revert during an active sops subprocess could recurse
+    ;; into another `sops--run' nested inside the first.  Polling fires only
+    ;; on its own timer (default 5 s), well outside any single subprocess.
+    (setq-local auto-revert-use-notify nil)
+    (auto-revert-mode 1)
+    ;; Inhibit apheleia (and any future formatters that respect this var
+    ;; convention).  Two reasons: (1) apheleia's before-save formatter runs
+    ;; before our `write-contents-functions' hook and can hang the save flow
+    ;; before sops is even reached; (2) reformatting decrypted plaintext
+    ;; before encrypt would change the ciphertext on every save, producing
+    ;; meaningless `git diff' churn even on no-op edits.  apheleia documents
+    ;; `apheleia-inhibit' as its buffer-local opt-out.
+    (setq-local apheleia-inhibit t))
    (t
     (when (buffer-modified-p)
       (setq sops-mode 1)  ; revert the toggle
       (user-error
        "sops: buffer modified; revert-buffer first or use M-x read-only-mode"))
+    (auto-revert-mode -1)
     (kill-local-variable 'make-backup-files)
     (kill-local-variable 'buffer-auto-save-file-name)
     (kill-local-variable 'revert-buffer-function)
+    (kill-local-variable 'apheleia-inhibit)
     (remove-hook 'write-contents-functions #'sops--write-contents-function t)
     (setq sops--state nil))))
 
@@ -364,7 +410,10 @@ function checks for that surviving flag and re-installs the rest."
     (setq-local buffer-auto-save-file-name nil)
     (setq-local revert-buffer-function #'sops--revert-buffer)
     (add-hook 'write-contents-functions
-              #'sops--write-contents-function nil t)))
+              #'sops--write-contents-function nil t)
+    (setq-local auto-revert-use-notify nil)
+    (auto-revert-mode 1)
+    (setq-local apheleia-inhibit t)))
 
 (add-hook 'after-change-major-mode-hook
           #'sops--restore-after-major-mode-change)

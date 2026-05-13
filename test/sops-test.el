@@ -555,9 +555,15 @@ with `status' = `decrypted'."
       (should (eq #'sops--revert-buffer revert-buffer-function))
       (should (sops-state-p sops--state))
       (should (eq 'decrypted (sops-state-status sops--state)))
+      (should (eq t apheleia-inhibit))
       (sops-mode -1)
       (should-not (memq #'sops--write-contents-function write-contents-functions))
-      (should (eq nil sops--state)))))
+      (should (eq nil sops--state))
+      ;; `kill-local-variable' restores the global default; the test
+      ;; environment doesn't have apheleia loaded, so the global is unbound
+      ;; -- assert the symbol is no longer buffer-local rather than checking
+      ;; its value.
+      (should-not (local-variable-p 'apheleia-inhibit)))))
 
 (ert-deftest sops-test--mode-disable-on-modified-buffer-blocked ()
   "Disabling sops-mode on modified buffer signals user-error."
@@ -729,6 +735,96 @@ buffer-local value, and restore prior state in `unwind-protect'."
           (global-sops-mode -1)
           (should-not (memq #'sops--find-file-hook (default-value 'find-file-hook))))
       (if was-on (global-sops-mode 1) (global-sops-mode -1)))))
+
+(ert-deftest sops-test--revert-buffer-refreshes-visited-file-modtime ()
+  "After `sops--revert-buffer', `verify-visited-file-modtime' returns t.
+Regression test for: pressing `r' at the \"FILE changed on disk; really
+edit?\" prompt would revert the buffer but leave the recorded modtime
+stale, so the next keystroke re-fired the same prompt indefinitely."
+  (sops-test--ensure-fixtures)
+  (let* ((src (sops-test--fixture "secrets.enc.yaml"))
+         (tmp (make-temp-file
+               (expand-file-name "sops-test-revert-modtime-" sops-test--fixtures)
+               nil ".enc.yaml")))
+    (unwind-protect
+        (progn
+          ;; Seed tmp with ciphertext BEFORE `find-file-noselect' so the
+          ;; buffer's initial visited-file-modtime matches disk.  Otherwise
+          ;; the `(copy-file src tmp t)' below would leave the buffer in a
+          ;; stale state and `sops--decrypt-buffer's `erase-buffer' would
+          ;; trigger Emacs's supersession check before we even reach the
+          ;; scenario the test is for.
+          (copy-file src tmp t)
+          (let ((buf (find-file-noselect tmp)))
+            (unwind-protect
+                (with-current-buffer buf
+                  (sops--decrypt-buffer)
+                  (sops-mode 1)
+                  ;; Simulate an external write: re-copy the source over the
+                  ;; temp file, advancing its modtime past what `find-file'
+                  ;; recorded.
+                  (sleep-for 1.1)  ; macOS APFS mtime resolution
+                  (copy-file src tmp t)
+                  ;; Pre-condition: modtime check fails because file changed
+                  ;; under us.
+                  (should-not (verify-visited-file-modtime buf))
+                  ;; The revert (what `r' at the prompt would call).
+                  (sops--revert-buffer)
+                  ;; Post-condition: modtime check passes; pressing a key
+                  ;; would no longer re-fire the prompt.
+                  (should (verify-visited-file-modtime buf)))
+              (with-current-buffer buf (set-buffer-modified-p nil))
+              (kill-buffer buf))))
+      (delete-file tmp))))
+
+(ert-deftest sops-test--mode-enables-auto-revert ()
+  "sops-mode turns on `auto-revert-mode' so external file changes flow
+through `sops--revert-buffer' without the user seeing a prompt."
+  (let ((file (sops-test--fixture "secrets.enc.yaml")))
+    (with-temp-buffer
+      (setq buffer-file-name file)
+      (insert-file-contents file)
+      (sops--decrypt-buffer)
+      (sops-mode 1)
+      (should auto-revert-mode)
+      (sops-mode -1)
+      (should-not auto-revert-mode))))
+
+(ert-deftest sops-test--encrypt-and-write-refreshes-visited-file-modtime ()
+  "After save, `verify-visited-file-modtime' returns t so the user
+doesn't see \"FILE has changed on disk; really edit the buffer?\" on
+the next edit.  Regression test for the v0.2 manual-testing bug
+where `find-file' recorded the encrypted file's modtime and our
+`write-region' replaced the on-disk file without refreshing the
+buffer's recorded modtime."
+  (sops-test--ensure-fixtures)
+  (let* ((src (sops-test--fixture "secrets.enc.yaml"))
+         (tmp (make-temp-file
+               (expand-file-name "sops-test-modtime-" sops-test--fixtures)
+               nil ".enc.yaml")))
+    (unwind-protect
+        (progn
+          (copy-file src tmp t)
+          (let ((buf (find-file-noselect tmp)))
+            (unwind-protect
+                (with-current-buffer buf
+                  (sops--decrypt-buffer)
+                  (sops-mode 1)
+                  ;; First edit + save.
+                  (goto-char (point-max))
+                  (insert "first: edit\n")
+                  (sops--encrypt-and-write)
+                  (should (verify-visited-file-modtime buf))
+                  ;; Second edit + save -- this is what triggered the
+                  ;; original bug since save 1 left the recorded modtime
+                  ;; stale relative to the file we just wrote.
+                  (goto-char (point-max))
+                  (insert "second: edit\n")
+                  (sops--encrypt-and-write)
+                  (should (verify-visited-file-modtime buf)))
+              (with-current-buffer buf (set-buffer-modified-p nil))
+              (kill-buffer buf))))
+      (delete-file tmp))))
 
 (provide 'sops-test)
 ;;; sops-test.el ends here
