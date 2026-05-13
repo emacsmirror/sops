@@ -227,8 +227,11 @@ between versions)."
     (should (> (length (plist-get result :stderr)) 0))))
 
 (ert-deftest sops-test--run-with-input ()
-  "sops--run can pipe input via :input."
-  (let ((result (sops--run '("filestatus" "--input-type" "yaml" "/dev/stdin")
+  "sops--run can deliver input via :input.  future work changed the
+delivery mechanism from `process-send-string' to a temp file whose
+path sops--run appends as the trailing arg, so callers no longer
+include `/dev/stdin' (or any input source) in their ARGS list."
+  (let ((result (sops--run '("filestatus" "--input-type" "yaml")
                            :input "foo: bar\n")))
     (should (eq 0 (plist-get result :exit-status)))
     (should (string-match-p "encrypted" (plist-get result :stdout)))))
@@ -521,7 +524,13 @@ encrypted file to just the visible region -- silent data loss."
 (ert-deftest sops-test--encrypt-and-write-passes-extra-encrypt-args ()
   "Items in `sops-extra-encrypt-args' appear in the sops invocation.
 Stubs `sops--run' so we can lock the wiring without depending on a
-specific sops flag being a no-op for encrypt."
+specific sops flag being a no-op for encrypt.
+
+future work contract: `sops--encrypt-and-write' no longer appends
+`/dev/stdin' to its args list -- `sops--run' itself appends the temp
+file path internally.  So the args passed to `sops--run' end with
+the last element of `sops-extra-encrypt-args' (or with
+`--filename-override FILE' when extra-args is nil)."
   (let* ((tmp (make-temp-file "sops-test-extra-" nil ".enc.yaml"))
          (sops-extra-encrypt-args '("-a" "age1stub"))
          (captured-args nil))
@@ -536,17 +545,20 @@ specific sops flag being a no-op for encrypt."
             (setq buffer-file-name tmp)
             (insert "plaintext\n")
             (sops--encrypt-and-write))
-          ;; Both extra-args land between --filename-override and /dev/stdin.
+          ;; Both extra-args land in the command after --filename-override
+          ;; FILE.  No /dev/stdin in the caller's args list anymore.
           (should (member "-a" captured-args))
           (should (member "age1stub" captured-args))
-          (should (equal "/dev/stdin" (car (last captured-args))))
-          ;; Order: -a comes before age1stub (preserved from input list).
+          (should-not (member "/dev/stdin" captured-args))
+          ;; Order: -a comes before age1stub (preserved from input list)
+          ;; and both come after --filename-override + file.
           (let ((dash-a-pos (cl-position "-a" captured-args :test #'equal))
                 (stub-pos (cl-position "age1stub" captured-args :test #'equal))
-                (stdin-pos (cl-position "/dev/stdin" captured-args :test #'equal)))
-            (should (and dash-a-pos stub-pos stdin-pos))
+                (override-pos (cl-position "--filename-override"
+                                           captured-args :test #'equal)))
+            (should (and dash-a-pos stub-pos override-pos))
             (should (< dash-a-pos stub-pos))
-            (should (< stub-pos stdin-pos))))
+            (should (< override-pos dash-a-pos))))
       (when (file-exists-p tmp) (delete-file tmp)))))
 
 (ert-deftest sops-test--mode-enable-installs-hooks ()
@@ -965,6 +977,200 @@ buffer's recorded modtime."
           (sops--check-v1-config)))
       (sops--check-v1-config))
     (should (eq nil warnings))))
+
+(ert-deftest sops-test--encrypt-args-no-trailing-stdin ()
+  "future work contract: sops--run for the encrypt path passes the temp-file
+path as the command's last argument, not the literal string
+\"/dev/stdin\".  Callers (sops--encrypt-and-write) no longer append
+\"/dev/stdin\" to their args list; sops--run appends the temp path.
+
+Wraps `make-process' via `cl-letf' to capture the full :command
+argument list at process-creation time.  The captured tail must be
+the temp-file path; the literal string \"/dev/stdin\" must not appear
+in the command at all."
+  (sops-test--ensure-fixtures)
+  (let* ((src (sops-test--fixture "secrets.enc.yaml"))
+         (tmp (make-temp-file
+               (expand-file-name "sops-test-cmd-" sops-test--fixtures)
+               nil ".enc.yaml"))
+         (captured-cmd nil))
+    (copy-file src tmp t)
+    (let ((buf (find-file-noselect tmp)))
+      (unwind-protect
+          (with-current-buffer buf
+            (sops--decrypt-buffer)
+            (sops-mode 1)
+            (goto-char (point-max))
+            (insert "extra: line\n")
+            (cl-letf* ((orig-mp (symbol-function 'make-process))
+                       ((symbol-function 'make-process)
+                        (lambda (&rest args)
+                          (when (equal (plist-get args :name) "sops")
+                            (setq captured-cmd (plist-get args :command)))
+                          (apply orig-mp args))))
+              (sops--encrypt-and-write))
+            (should captured-cmd)
+            (should-not (member "/dev/stdin" captured-cmd))
+            ;; Last element of the command should be a temp-file path.
+            (should (string-prefix-p
+                     "sops-input-"
+                     (file-name-nondirectory (car (last captured-cmd))))))
+        (with-current-buffer buf (set-buffer-modified-p nil))
+        (kill-buffer buf)
+        (delete-file tmp)))))
+
+(ert-deftest sops-test--encrypt-uses-temp-file-with-mode-0600 ()
+  "Lock the safety property that `sops--run's temp file for `:input'
+is created at mode 0600.  Captures the path returned by
+`make-temp-file' via `cl-letf' advice and immediately reads
+`(file-modes path)' before the temp file is deleted."
+  (sops-test--ensure-fixtures)
+  (let* ((src (sops-test--fixture "secrets.enc.yaml"))
+         (tmp (make-temp-file
+               (expand-file-name "sops-test-mode-" sops-test--fixtures)
+               nil ".enc.yaml"))
+         (captured-path nil)
+         (captured-mode nil))
+    (copy-file src tmp t)
+    (let ((buf (find-file-noselect tmp)))
+      (unwind-protect
+          (with-current-buffer buf
+            (sops--decrypt-buffer)
+            (sops-mode 1)
+            (goto-char (point-max))
+            (insert "extra: line\n")
+            (cl-letf* ((orig-mtf (symbol-function 'make-temp-file))
+                       ((symbol-function 'make-temp-file)
+                        (lambda (&rest args)
+                          (let ((p (apply orig-mtf args)))
+                            (when (string-prefix-p
+                                   "sops-input-"
+                                   (file-name-nondirectory p))
+                              (setq captured-path p
+                                    captured-mode (file-modes p)))
+                            p))))
+              (sops--encrypt-and-write))
+            (should captured-path)
+            (should (equal captured-mode #o600)))
+        (with-current-buffer buf (set-buffer-modified-p nil))
+        (kill-buffer buf)
+        (delete-file tmp)))))
+
+(ert-deftest sops-test--encrypt-temp-file-deleted-on-success ()
+  "Lock the cleanup property: after a successful
+`sops--encrypt-and-write', the temp file `sops--run' created for the
+payload no longer exists."
+  (sops-test--ensure-fixtures)
+  (let* ((src (sops-test--fixture "secrets.enc.yaml"))
+         (tmp (make-temp-file
+               (expand-file-name "sops-test-cleanup-ok-" sops-test--fixtures)
+               nil ".enc.yaml"))
+         (captured-path nil))
+    (copy-file src tmp t)
+    (let ((buf (find-file-noselect tmp)))
+      (unwind-protect
+          (with-current-buffer buf
+            (sops--decrypt-buffer)
+            (sops-mode 1)
+            (goto-char (point-max))
+            (insert "extra: line\n")
+            (cl-letf* ((orig-mtf (symbol-function 'make-temp-file))
+                       ((symbol-function 'make-temp-file)
+                        (lambda (&rest args)
+                          (let ((p (apply orig-mtf args)))
+                            (when (string-prefix-p
+                                   "sops-input-"
+                                   (file-name-nondirectory p))
+                              (setq captured-path p))
+                            p))))
+              (sops--encrypt-and-write))
+            (should captured-path)
+            (should-not (file-exists-p captured-path)))
+        (with-current-buffer buf (set-buffer-modified-p nil))
+        (kill-buffer buf)
+        (delete-file tmp)))))
+
+(ert-deftest sops-test--encrypt-temp-file-deleted-on-failure ()
+  "Lock the cleanup property under failure: when sops encrypt fails,
+`sops--encrypt-and-write' signals user-error AND the temp file
+`sops--run' created has been deleted by the unwind-protect cleanup.
+
+Failure injection mirrors
+`sops-test--encrypt-and-write-failure-leaves-file-untouched': place
+the buffer's target file in `/tmp' (outside the fixture's
+`.sops.yaml' coverage) so sops errors with `no matching creation
+rules found'.  Note: `SOPS_AGE_KEY_FILE' is irrelevant on the
+encrypt path (sops uses the recipient from .sops.yaml, not the
+private age key file), so it cannot be used to force encrypt
+failure -- only decrypt."
+  (let* ((tmp (make-temp-file "sops-test-cleanup-fail-" nil ".enc.yaml"))
+         (captured-path nil)
+         (err nil))
+    (unwind-protect
+        (with-temp-buffer
+          (setq buffer-file-name tmp)
+          (insert "plain content; no .sops.yaml rule for /tmp\n")
+          (cl-letf* ((orig-mtf (symbol-function 'make-temp-file))
+                     ((symbol-function 'make-temp-file)
+                      (lambda (&rest args)
+                        (let ((p (apply orig-mtf args)))
+                          (when (string-prefix-p
+                                 "sops-input-"
+                                 (file-name-nondirectory p))
+                            (setq captured-path p))
+                          p))))
+            (condition-case e
+                (sops--encrypt-and-write)
+              (user-error (setq err e))))
+          (should err)
+          (should captured-path)
+          (should-not (file-exists-p captured-path)))
+      (when (get-buffer (format "*sops-error: %s*" tmp))
+        (kill-buffer (format "*sops-error: %s*" tmp)))
+      (when (file-exists-p tmp) (delete-file tmp)))))
+
+(ert-deftest sops-test--encrypt-temp-file-uses-utf-8-unix ()
+  "Lock the coding system: the temp file `sops--run' writes for the
+payload uses `utf-8-unix' (LF newlines, no CRLF translation, UTF-8
+character encoding).  Verified by capturing the temp-file bytes mid
+write via advice on `write-region', and comparing to the buffer
+content normalized to utf-8-unix."
+  (sops-test--ensure-fixtures)
+  (let* ((src (sops-test--fixture "secrets.enc.yaml"))
+         (tmp (make-temp-file
+               (expand-file-name "sops-test-encoding-" sops-test--fixtures)
+               nil ".enc.yaml"))
+         (captured-bytes nil))
+    (copy-file src tmp t)
+    (let ((buf (find-file-noselect tmp)))
+      (unwind-protect
+          (with-current-buffer buf
+            (sops--decrypt-buffer)
+            (sops-mode 1)
+            (goto-char (point-max))
+            (insert "line_a: 1\nline_b: 2\n")
+            (cl-letf* ((orig-wr (symbol-function 'write-region))
+                       ((symbol-function 'write-region)
+                        (lambda (start end filename &rest rest)
+                          (apply orig-wr start end filename rest)
+                          (when (and (stringp filename)
+                                     (string-prefix-p
+                                      "sops-input-"
+                                      (file-name-nondirectory filename)))
+                            (setq captured-bytes
+                                  (with-temp-buffer
+                                    (let ((coding-system-for-read 'binary))
+                                      (insert-file-contents-literally filename))
+                                    (buffer-string)))))))
+              (sops--encrypt-and-write))
+            (should captured-bytes)
+            ;; LF newlines only, no CRLF anywhere.
+            (should-not (string-match-p "\r\n" captured-bytes))
+            ;; The lines we inserted should appear verbatim.
+            (should (string-match-p "line_a: 1\nline_b: 2\n" captured-bytes)))
+        (with-current-buffer buf (set-buffer-modified-p nil))
+        (kill-buffer buf)
+        (delete-file tmp)))))
 
 (provide 'sops-test)
 ;;; sops-test.el ends here

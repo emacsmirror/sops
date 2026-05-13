@@ -35,7 +35,7 @@ To create a new encrypted file: see =sops-find-file= in future work (not yet shi
 | =sops-executable=           | ="sops"=       | Path to sops binary                                                          |
 | =sops-prefilter-regex=      | (see below)    | Files matching trigger filestatus check                                      |
 | =sops-decrypt-args=         | ='("decrypt")= | Args to sops decrypt (file appended)                                         |
-| =sops-extra-encrypt-args=   | =nil=          | Extra args inserted before /dev/stdin in encrypt                             |
+| =sops-extra-encrypt-args=   | =nil=          | Extra args appended after =--filename-override FILE= in encrypt              |
 | =sops-input-type-overrides= | =nil=          | Alist of (REGEX . TYPE) for files where extension doesn't tell sops the type |
 
 The default =sops-prefilter-regex= is:

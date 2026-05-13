@@ -97,44 +97,43 @@ plaintext'.  Leading/trailing whitespace in JSON-STRING is trimmed."
 (defun sops--run (args &rest keys)
   "Run sops with ARGS.
 Keyword args:
-  :input STRING  -- pipe STRING to sops's stdin
+  :input STRING  -- write STRING to a temp file (mode 0600) and pass
+                    its path to sops as the trailing argument.  The
+                    temp file is deleted in the unwind-protect cleanup.
+                    Matches Emacs core's EPG/EPA convention: stdin is
+                    reserved for prompt responses; payload bytes go
+                    via the file path.
   :filter FN     -- process filter (nil in v0.2; populated in future work)
 Return plist (:exit-status N :stdout STR :stderr STR)."
   (let* ((input (plist-get keys :input))
          (filter (plist-get keys :filter))
          (stdout-buf (generate-new-buffer " *sops-stdout*" t))
          (stderr-buf (generate-new-buffer " *sops-stderr*" t))
+         (input-file (when input
+                       (with-file-modes #o600
+                         (make-temp-file "sops-input-"))))
          (done nil)
          (proc nil))
     (unwind-protect
         (let ((process-environment
                (cons "SOPS_DISABLE_VERSION_CHECK=true" process-environment)))
+          (when input
+            (let ((coding-system-for-write 'utf-8-unix))
+              (write-region input nil input-file nil 'silent)))
           (setq proc
                 (make-process
                  :name "sops"
                  :buffer stdout-buf
                  :stderr stderr-buf
-                 :command (cons sops-executable args)
+                 :command (cons sops-executable
+                                (if input-file
+                                    (append args (list input-file))
+                                  args))
                  :connection-type 'pipe
                  :filter filter
                  :sentinel (lambda (_p _event) (setq done t))))
-          ;; Force utf-8-unix on both ends.  Sops emits text (YAML/JSON/ENV/INI
-          ;; with base64-encoded ENC[...] strings); locking the coding system
-          ;; prevents CRLF translation on Windows-built Emacs from corrupting
-          ;; the encrypted blob round-trip.
           (set-process-coding-system proc 'utf-8-unix 'utf-8-unix)
-          (when input
-            (process-send-string proc input)
-            (process-send-eof proc))
-          ;; This loop blocks the Emacs main thread until sops exits.  C-g
-          ;; works (accept-process-output respects quit-flag), but sops calls
-          ;; that hang waiting for interactive input (yubikey touch, age PIN)
-          ;; freeze the UI until C-g.  future work adds a process :filter that
-          ;; watches stderr for known prompts and responds via process-send-string;
-          ;; that's the architectural fix.
           (while (not done)
-            ;; 100 ms timeout balances UI responsiveness for fast commands
-            ;; (--version, filestatus) against CPU spin for slow ones (decrypt).
             (accept-process-output proc 0.1))
           (list :exit-status (process-exit-status proc)
                 :stdout (with-current-buffer stdout-buf (buffer-string))
@@ -142,7 +141,9 @@ Return plist (:exit-status N :stdout STR :stderr STR)."
       (when (and proc (process-live-p proc))
         (delete-process proc))
       (when (buffer-live-p stdout-buf) (kill-buffer stdout-buf))
-      (when (buffer-live-p stderr-buf) (kill-buffer stderr-buf)))))
+      (when (buffer-live-p stderr-buf) (kill-buffer stderr-buf))
+      (when (and input-file (file-exists-p input-file))
+        (delete-file input-file)))))
 
 (defvar sops--version-cache nil
   "Cons of (PATH . VERSION-STRING) cached after first successful sops --version.
@@ -213,8 +214,10 @@ displayed buffer."
   :group 'sops)
 
 (defcustom sops-extra-encrypt-args nil
-  "Additional arguments inserted before the trailing /dev/stdin in encrypt.
-Example for age SSH: \\='(\"-a\" \"<ssh-key>\")."
+  "Additional arguments to sops on encrypt.
+Inserted between `--filename-override FILE' and the trailing
+input-file path that `sops--run' appends.  Example for age SSH:
+\\='(\"-a\" \"<ssh-key>\")."
   :type '(repeat string)
   :group 'sops)
 
@@ -286,8 +289,7 @@ our write replaced it."
          (args (append '("encrypt" "--filename-override")
                        (list file)
                        (when input-type (list "--input-type" input-type))
-                       sops-extra-encrypt-args
-                       '("/dev/stdin")))
+                       sops-extra-encrypt-args))
          (result (sops--run args :input (save-restriction
                                           (widen)
                                           (buffer-substring-no-properties
