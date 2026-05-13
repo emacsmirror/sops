@@ -121,5 +121,85 @@ plus a plaintext negative-test sample."
     (should (eq 'decrypted (sops-state-status s)))
     (should (equal "boom" (sops-state-last-error s)))))
 
+(ert-deftest sops-test--prefilter-matches-yaml ()
+  "Default prefilter matches yaml/yml/json/env/ini/txt.
+Pin `case-fold-search' so the suite isn't sensitive to runner state."
+  (let ((case-fold-search t))
+    (dolist (name '("/tmp/x.yaml" "/tmp/x.yml" "/tmp/x.json"
+                    "/tmp/x.env" "/tmp/x.ini" "/tmp/x.txt"))
+      (should (sops--prefilter-p name)))))
+
+(ert-deftest sops-test--prefilter-rejects-others ()
+  "Default prefilter rejects non-target extensions."
+  (let ((case-fold-search t))
+    (dolist (name '("/tmp/x.png" "/tmp/x.exe" "/tmp/x.gz" "/tmp/x.gpg" "/tmp/x.el" nil))
+      (should-not (sops--prefilter-p name)))))
+
+(ert-deftest sops-test--prefilter-respects-custom-regex ()
+  "Custom sops-prefilter-regex overrides the default."
+  (let ((case-fold-search t)
+        (sops-prefilter-regex "\\.secrets\\'"))
+    (should (sops--prefilter-p "/tmp/x.secrets"))
+    (should-not (sops--prefilter-p "/tmp/x.yaml"))))
+
+(ert-deftest sops-test--input-type-for-no-override ()
+  "Returns nil when no override matches."
+  (let ((sops-input-type-overrides nil))
+    (should (eq nil (sops--input-type-for "/tmp/x.yaml")))))
+
+(ert-deftest sops-test--input-type-for-with-override ()
+  "Returns the matching type string; literal-dot escaping is honored."
+  (let ((sops-input-type-overrides '(("\\.secrets\\'" . "yaml")
+                                     ("\\.envrc\\'" . "dotenv"))))
+    (should (equal "yaml" (sops--input-type-for "/tmp/x.secrets")))
+    (should (equal "dotenv" (sops--input-type-for "/tmp/.envrc")))
+    (should (eq nil (sops--input-type-for "/tmp/x.yaml")))
+    ;; Pin the literal-dot expectation: an unescaped `.' would match here.
+    (should (eq nil (sops--input-type-for "/tmp/asecrets")))))
+
+(ert-deftest sops-test--input-type-for-nil-filename ()
+  "Returns nil for nil filename without erroring."
+  (should (eq nil (sops--input-type-for nil))))
+
+(ert-deftest sops-test--input-type-for-first-match-wins ()
+  "When two pairs both match, the first one in list order is returned."
+  (let ((sops-input-type-overrides '(("\\.foo\\'" . "first")
+                                     ("\\.foo\\'" . "second"))))
+    (should (equal "first" (sops--input-type-for "/tmp/x.foo")))))
+
+(ert-deftest sops-test--parse-filestatus-encrypted-true ()
+  "Strict JSON `{\"encrypted\":true}' returns t."
+  (should (eq t (sops--parse-filestatus "{\"encrypted\":true}"))))
+
+(ert-deftest sops-test--parse-filestatus-encrypted-false ()
+  "Strict JSON `{\"encrypted\":false}' returns nil."
+  (should (eq nil (sops--parse-filestatus "{\"encrypted\":false}"))))
+
+(ert-deftest sops-test--parse-filestatus-malformed ()
+  "Malformed JSON returns nil (defensive)."
+  (should (eq nil (sops--parse-filestatus "not json")))
+  (should (eq nil (sops--parse-filestatus "")))
+  (should (eq nil (sops--parse-filestatus "{}"))))
+
+(ert-deftest sops-test--parse-filestatus-trailing-whitespace ()
+  "Whitespace/newlines around JSON are tolerated."
+  (should (eq t (sops--parse-filestatus "{\"encrypted\":true}\n")))
+  (should (eq t (sops--parse-filestatus "  {\"encrypted\":true}  "))))
+
+(ert-deftest sops-test--parse-filestatus-missing-key ()
+  "JSON without an `encrypted' key returns nil even if other keys are true."
+  (should (eq nil (sops--parse-filestatus "{\"other\":true}"))))
+
+(ert-deftest sops-test--parse-filestatus-non-boolean-value ()
+  "Strict-t check: any non-boolean value at `encrypted' returns nil.
+Locks the discriminator against future `truthiness' loosening."
+  (should (eq nil (sops--parse-filestatus "{\"encrypted\":\"true\"}")))
+  (should (eq nil (sops--parse-filestatus "{\"encrypted\":1}")))
+  (should (eq nil (sops--parse-filestatus "{\"encrypted\":[1,2]}"))))
+
+(ert-deftest sops-test--parse-filestatus-non-string-input ()
+  "Non-string input returns nil rather than erroring."
+  (should (eq nil (sops--parse-filestatus nil))))
+
 (provide 'sops-test)
 ;;; sops-test.el ends here
