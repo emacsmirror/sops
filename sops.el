@@ -300,5 +300,101 @@ value -- the user can't usefully edit them manually."
     (set-buffer-modified-p nil)
     t))
 
+(defvar-local sops--state nil
+  "An `sops-state' struct for the current buffer, or nil if sops-mode is off.")
+
+(defun sops--write-contents-function ()
+  "Hook function for `write-contents-functions'.
+Returns t when save was handled (skipping normal write); signals user-error on fail."
+  (sops--encrypt-and-write))
+
+(defun sops--revert-buffer (&rest _args)
+  "Revert function for sops-mode buffers: re-read encrypted file and decrypt.
+Widens before erasing so a narrowed buffer doesn't corrupt itself with
+mixed encrypted + plaintext content (parallels the narrowing defense
+in `sops--encrypt-and-write')."
+  (save-restriction
+    (widen)
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (insert-file-contents buffer-file-name)))
+  (sops--decrypt-buffer)
+  (set-buffer-modified-p nil))
+
+;;;###autoload
+(define-minor-mode sops-mode
+  "Edit the current SOPS-encrypted file transparently.
+Decryption happens at find-file; encryption happens at save-buffer.
+Plaintext never reaches disk (backups and auto-save are suppressed)."
+  :init-value nil
+  :lighter " sops"
+  :group 'sops
+  (cond
+   (sops-mode
+    (unless sops--state
+      (setq sops--state (sops-state-create :status 'decrypted)))
+    (setq-local make-backup-files nil)
+    (setq-local buffer-auto-save-file-name nil)
+    (setq-local revert-buffer-function #'sops--revert-buffer)
+    (add-hook 'write-contents-functions #'sops--write-contents-function nil t))
+   (t
+    (when (buffer-modified-p)
+      (setq sops-mode 1)  ; revert the toggle
+      (user-error
+       "sops: buffer modified; revert-buffer first or use M-x read-only-mode"))
+    (kill-local-variable 'make-backup-files)
+    (kill-local-variable 'buffer-auto-save-file-name)
+    (kill-local-variable 'revert-buffer-function)
+    (remove-hook 'write-contents-functions #'sops--write-contents-function t)
+    (setq sops--state nil))))
+
+;; Survive `kill-all-local-variables' (which fires whenever the user changes
+;; major mode).  Without this, our protections evaporate and a subsequent
+;; save would write plaintext to disk.
+(put 'sops-mode 'permanent-local t)
+(put 'sops--state 'permanent-local t)
+
+(defun sops--restore-after-major-mode-change ()
+  "Re-install sops-mode buffer protections after a major-mode change.
+`kill-all-local-variables' wipes our hook entries and buffer-local var
+settings, but `sops-mode' itself is permanent-local and survives.  This
+function checks for that surviving flag and re-installs the rest."
+  (when sops-mode
+    (setq-local make-backup-files nil)
+    (setq-local buffer-auto-save-file-name nil)
+    (setq-local revert-buffer-function #'sops--revert-buffer)
+    (add-hook 'write-contents-functions
+              #'sops--write-contents-function nil t)))
+
+(add-hook 'after-change-major-mode-hook
+          #'sops--restore-after-major-mode-change)
+
+(defun sops--find-file-hook ()
+  "On find-file: if file matches prefilter and is sops-encrypted, decrypt.
+Skips remote (TRAMP) files in v0.2 — local sops binary cannot read TRAMP
+paths.  Remote support belongs in the separate `tramp-sops' package."
+  (when (and buffer-file-name
+             (not (file-remote-p buffer-file-name))
+             (sops--prefilter-p buffer-file-name)
+             (file-readable-p buffer-file-name))
+    (condition-case err
+        (when (sops--ensure-version)
+          (when (sops--filestatus buffer-file-name)
+            (if (sops--decrypt-buffer)
+                (sops-mode 1)
+              (read-only-mode 1))))
+      (user-error
+       ;; sops missing or too old: log once, do nothing
+       (message "sops: %s" (error-message-string err))))))
+
+;;;###autoload
+(define-globalized-minor-mode global-sops-mode
+  sops-mode
+  (lambda () nil)  ; sops-mode itself is enabled inside sops--find-file-hook, not here
+  :group 'sops
+  (if global-sops-mode
+      (add-hook 'find-file-hook #'sops--find-file-hook)
+    (remove-hook 'find-file-hook #'sops--find-file-hook)))
+
 (provide 'sops)
 ;;; sops.el ends here

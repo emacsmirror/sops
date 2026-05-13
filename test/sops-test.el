@@ -539,5 +539,196 @@ specific sops flag being a no-op for encrypt."
             (should (< stub-pos stdin-pos))))
       (when (file-exists-p tmp) (delete-file tmp)))))
 
+(ert-deftest sops-test--mode-enable-installs-hooks ()
+  "Enabling sops-mode installs write-contents-functions and suppresses backups.
+Also asserts that `sops--state' is initialized to a `sops-state' struct
+with `status' = `decrypted'."
+  (let ((file (sops-test--fixture "secrets.enc.yaml")))
+    (with-temp-buffer
+      (setq buffer-file-name file)
+      (insert-file-contents file)
+      (sops--decrypt-buffer)
+      (sops-mode 1)
+      (should (memq #'sops--write-contents-function write-contents-functions))
+      (should (eq nil make-backup-files))
+      (should (eq nil buffer-auto-save-file-name))
+      (should (eq #'sops--revert-buffer revert-buffer-function))
+      (should (sops-state-p sops--state))
+      (should (eq 'decrypted (sops-state-status sops--state)))
+      (sops-mode -1)
+      (should-not (memq #'sops--write-contents-function write-contents-functions))
+      (should (eq nil sops--state)))))
+
+(ert-deftest sops-test--mode-disable-on-modified-buffer-blocked ()
+  "Disabling sops-mode on modified buffer signals user-error."
+  (let ((file (sops-test--fixture "secrets.enc.yaml")))
+    (with-temp-buffer
+      (setq buffer-file-name file)
+      (insert-file-contents file)
+      (sops--decrypt-buffer)
+      (sops-mode 1)
+      (insert "modification")
+      (should (buffer-modified-p))
+      (should-error (sops-mode -1) :type 'user-error))))
+
+(ert-deftest sops-test--save-buffer-encrypts ()
+  "save-buffer in sops-mode triggers encrypt-and-write."
+  (let* ((src (sops-test--fixture "secrets.enc.yaml"))
+         (tmp (make-temp-file
+               (expand-file-name "sops-test-save-" sops-test--fixtures)
+               nil ".enc.yaml")))
+    (unwind-protect
+        (progn
+          (copy-file src tmp t)
+          (with-temp-buffer
+            (setq buffer-file-name tmp)
+            (setq default-directory (file-name-directory tmp))
+            (insert-file-contents tmp)
+            (sops--decrypt-buffer)
+            (sops-mode 1)
+            (goto-char (point-max))
+            (insert "save_test: saved\n")
+            (let ((coding-system-for-write 'no-conversion))
+              (save-buffer)))
+          (with-temp-buffer
+            (setq buffer-file-name tmp)
+            (setq default-directory (file-name-directory tmp))
+            (insert-file-contents tmp)
+            (sops--decrypt-buffer)
+            (should (string-match-p "save_test: saved" (buffer-string)))))
+      (delete-file tmp))))
+
+(ert-deftest sops-test--revert-buffer-redecrypts ()
+  "After modify, revert-buffer restores original decrypted content."
+  (let ((file (sops-test--fixture "secrets.enc.yaml")))
+    (with-temp-buffer
+      (setq buffer-file-name file)
+      (setq default-directory (file-name-directory file))
+      (insert-file-contents file)
+      (sops--decrypt-buffer)
+      (sops-mode 1)
+      (let ((orig (buffer-string)))
+        (goto-char (point-max))
+        (insert "transient")
+        (revert-buffer t t)
+        (should (equal orig (buffer-string)))))))
+
+(ert-deftest sops-test--mode-survives-major-mode-change ()
+  "Changing major mode preserves sops-mode and re-installs protections.
+This is the regression test for the plaintext-leak failure mode where
+`kill-all-local-variables' wipes our write-contents-function and the
+backup/auto-save suppression."
+  (let ((file (sops-test--fixture "secrets.enc.yaml")))
+    (with-temp-buffer
+      (setq buffer-file-name file)
+      (insert-file-contents file)
+      (sops--decrypt-buffer)
+      (sops-mode 1)
+      (should sops-mode)
+      (should (memq #'sops--write-contents-function write-contents-functions))
+      ;; Switch major mode (simulates user running M-x conf-mode etc.)
+      (text-mode)
+      ;; sops-mode is permanent-local, so the value survives
+      (should sops-mode)
+      ;; The hook entry was wiped by kill-all-local-variables but
+      ;; after-change-major-mode-hook re-installed it
+      (should (memq #'sops--write-contents-function write-contents-functions))
+      (should (eq nil make-backup-files))
+      (should (eq nil buffer-auto-save-file-name))
+      (should (eq #'sops--revert-buffer revert-buffer-function))
+      ;; sops--state is also permanent-local, so the struct survives
+      (should (sops-state-p sops--state)))))
+
+(ert-deftest sops-test--find-file-hook-decrypts-encrypted ()
+  "find-file-hook on encrypted file decrypts and enables sops-mode."
+  (let* ((find-file-hook nil)  ; isolate from any user/global hooks
+         (buf (find-file-noselect (sops-test--fixture "secrets.enc.yaml"))))
+    (unwind-protect
+        (with-current-buffer buf
+          (sops--find-file-hook)
+          (should sops-mode)
+          (should (string-match-p "database_password: super-secret-yaml"
+                                  (buffer-string))))
+      (kill-buffer buf))))
+
+(ert-deftest sops-test--find-file-hook-skips-plaintext ()
+  "find-file-hook on plaintext yaml does nothing."
+  (let* ((find-file-hook nil)
+         (buf (find-file-noselect (sops-test--fixture "plain.yaml"))))
+    (unwind-protect
+        (with-current-buffer buf
+          (sops--find-file-hook)
+          (should-not sops-mode)
+          (should (string-match-p "not: a-sops-file" (buffer-string))))
+      (kill-buffer buf))))
+
+(ert-deftest sops-test--find-file-hook-skips-non-prefiltered ()
+  "find-file-hook ignores files not matching sops-prefilter-regex."
+  (let ((find-file-hook nil)
+        (tmp (make-temp-file "sops-test-png-" nil ".png")))
+    (unwind-protect
+        (let ((buf (find-file-noselect tmp)))
+          (with-current-buffer buf
+            (sops--find-file-hook)
+            (should-not sops-mode))
+          (kill-buffer buf))
+      (delete-file tmp))))
+
+(ert-deftest sops-test--find-file-hook-skips-tramp ()
+  "find-file-hook is a no-op for remote (TRAMP) paths.
+Remote sops support is out of scope for v0.2 (tracked in tramp-sops);
+the local sops binary cannot read TRAMP paths, so we skip rather than
+spawning a subprocess that would error."
+  (with-temp-buffer
+    (setq buffer-file-name "/ssh:host:/path/to/secret.yaml")
+    (sops--find-file-hook)
+    (should-not sops-mode)))
+
+(ert-deftest sops-test--find-file-hook-decrypt-failure-makes-readonly ()
+  "On decrypt failure, buffer is read-only and sops-mode not enabled.
+The bad SOPS_AGE_KEY_FILE only affects the decrypt step; sops --version
+and sops filestatus inspect metadata only and don't need the key, so
+the guard chain reaches `sops--decrypt-buffer' before failing."
+  (let* ((find-file-hook nil)
+         (file (sops-test--fixture "secrets.enc.yaml"))
+         (buf (find-file-noselect file))
+         (buf-name (format "*sops-error: %s*" file)))
+    (when (get-buffer buf-name) (kill-buffer buf-name))
+    (unwind-protect
+        (with-current-buffer buf
+          (let ((process-environment
+                 (cons "SOPS_AGE_KEY_FILE=/tmp/nonexistent-key" process-environment)))
+            (sops--find-file-hook))
+          (should-not sops-mode)
+          (should buffer-read-only)
+          (should (get-buffer buf-name)))
+      (when (get-buffer buf-name) (kill-buffer buf-name))
+      (kill-buffer buf))))
+
+(ert-deftest sops-test--find-file-hook-swallows-user-error-from-version ()
+  "When `sops--ensure-version' raises user-error (sops missing/too old),
+the hook logs and returns nil rather than propagating to the debugger."
+  (let ((sops-executable "/no/such/sops/binary")
+        (sops--version-cache nil))
+    (with-temp-buffer
+      (setq buffer-file-name (sops-test--fixture "secrets.enc.yaml"))
+      ;; Should NOT signal; condition-case in the hook traps user-error.
+      (sops--find-file-hook)
+      (should-not sops-mode))))
+
+(ert-deftest sops-test--global-sops-mode-toggles-find-file-hook ()
+  "Toggling global-sops-mode adds/removes sops--find-file-hook globally.
+`add-hook' modifies the default (global) value of `find-file-hook'
+unless told otherwise, so we check `default-value' rather than the
+buffer-local value, and restore prior state in `unwind-protect'."
+  (let ((was-on global-sops-mode))
+    (unwind-protect
+        (progn
+          (global-sops-mode 1)
+          (should (memq #'sops--find-file-hook (default-value 'find-file-hook)))
+          (global-sops-mode -1)
+          (should-not (memq #'sops--find-file-hook (default-value 'find-file-hook))))
+      (if was-on (global-sops-mode 1) (global-sops-mode -1)))))
+
 (provide 'sops-test)
 ;;; sops-test.el ends here
