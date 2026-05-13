@@ -165,5 +165,47 @@ Signals `user-error' if sops is missing or too old.  Caches result."
       (setq sops--version-cache (cons sops-executable version))))
   (cdr sops--version-cache))
 
+(defun sops--filestatus (file)
+  "Return t if FILE is sops-encrypted, nil otherwise.
+Threads `sops-input-type-overrides' as `--input-type' if matched.
+
+A nil return means \"not known to be encrypted\" -- sops errored, the
+file is unreadable, the JSON parse failed, or the file is genuinely
+plaintext.  Callers must not treat nil as a positive plaintext signal;
+only treat t as a positive encrypted signal."
+  (let* ((input-type (sops--input-type-for file))
+         (args (append '("filestatus")
+                       (when input-type (list "--input-type" input-type))
+                       (list file)))
+         (result (sops--run args)))
+    (and (eq 0 (plist-get result :exit-status))
+         (sops--parse-filestatus (plist-get result :stdout)))))
+
+(defun sops--popup-error (file args exit-status stderr)
+  "Pop up *sops-error: FILE* with details of a sops invocation failure.
+ARGS is the list passed to sops, EXIT-STATUS the exit code (integer),
+STDERR the captured stderr (string; pass \"\" if absent).  Returns the
+displayed buffer."
+  (let* ((buf-name (format "*sops-error: %s*" file))
+         (buf (get-buffer-create buf-name)))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "sops %s\n" (mapconcat #'identity args " "))
+                (format "Exit status: %d\n" exit-status)
+                (format "Time: %s\n" (format-time-string "%FT%T%z"))
+                "─── stderr ───\n"
+                stderr
+                "\n─── recovery ───\n"
+                "Fix the issue above (e.g., re-auth, plug in yubikey,"
+                " set AWS_PROFILE), then in the original buffer:\n"
+                "  C-x C-s            retry save (encrypt errors)\n"
+                "  M-x revert-buffer  retry decrypt (decrypt errors)\n"))
+      (set-buffer-modified-p nil)
+      (read-only-mode 1)
+      (local-set-key (kbd "q") #'quit-window))
+    (display-buffer buf)
+    buf))
+
 (provide 'sops)
 ;;; sops.el ends here

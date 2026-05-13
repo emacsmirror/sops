@@ -270,5 +270,62 @@ Locks the contract that sops--run does not silently swallow exec failures."
     (should-error (sops--ensure-version) :type 'user-error))
   (should (eq nil sops--version-cache)))
 
+(ert-deftest sops-test--filestatus-encrypted-fixture ()
+  "Real sops filestatus returns t on encrypted YAML fixture."
+  (should (eq t (sops--filestatus (sops-test--fixture "secrets.enc.yaml")))))
+
+(ert-deftest sops-test--filestatus-encrypted-json ()
+  (should (eq t (sops--filestatus (sops-test--fixture "config.enc.json")))))
+
+(ert-deftest sops-test--filestatus-encrypted-env ()
+  (should (eq t (sops--filestatus (sops-test--fixture "vars.enc.env")))))
+
+(ert-deftest sops-test--filestatus-encrypted-txt-needs-input-type ()
+  "TXT fixture requires sops-input-type-overrides for sops to know format."
+  (let ((sops-input-type-overrides
+         '(("notes\\.enc\\.txt\\'" . "yaml"))))
+    (should (eq t (sops--filestatus (sops-test--fixture "notes.enc.txt"))))))
+
+(ert-deftest sops-test--filestatus-plaintext-fixture ()
+  (should (eq nil (sops--filestatus (sops-test--fixture "plain.yaml")))))
+
+(ert-deftest sops-test--filestatus-nonexistent-file ()
+  "Returns nil for non-existent file (sops errors, we degrade gracefully)."
+  (should (eq nil (sops--filestatus "/tmp/nonexistent-sops-test-file.yaml"))))
+
+(ert-deftest sops-test--popup-error-creates-buffer ()
+  "Creates *sops-error: FILE* buffer with stderr content; returns the buffer.
+Captures the function's return value so a future regression that returns
+nil (or the wrong buffer) is caught here, not just by the get-buffer
+lookup."
+  (let* ((file "/tmp/example.enc.yaml")
+         (buf-name (format "*sops-error: %s*" file)))
+    (when (get-buffer buf-name) (kill-buffer buf-name))
+    (let ((buf (sops--popup-error file '("decrypt" "/tmp/example.enc.yaml")
+                                  1 "FAILED: bad credentials\n")))
+      (should buf)
+      (should (eq buf (get-buffer buf-name)))
+      (with-current-buffer buf
+        (should (string-match-p "sops decrypt" (buffer-string)))
+        (should (string-match-p "Exit status: 1" (buffer-string)))
+        (should (string-match-p "FAILED: bad credentials" (buffer-string)))
+        (should (string-match-p "recovery" (buffer-string)))
+        (should (string-match-p "C-x C-s" (buffer-string)))
+        (should buffer-read-only)
+        (should-not (buffer-modified-p)))
+      (kill-buffer buf))))
+
+(ert-deftest sops-test--popup-error-reuses-buffer ()
+  "Subsequent failures for same file reuse the buffer (erase + rewrite)."
+  (let* ((file "/tmp/x.yaml")
+         (buf-name (format "*sops-error: %s*" file)))
+    (when (get-buffer buf-name) (kill-buffer buf-name))
+    (sops--popup-error file '("decrypt") 1 "first error\n")
+    (sops--popup-error file '("decrypt") 1 "second error\n")
+    (with-current-buffer buf-name
+      (should (string-match-p "second error" (buffer-string)))
+      (should-not (string-match-p "first error" (buffer-string))))
+    (kill-buffer buf-name)))
+
 (provide 'sops-test)
 ;;; sops-test.el ends here
