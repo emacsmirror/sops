@@ -316,6 +316,36 @@ our write replaced it."
 Returns t when save was handled (skipping normal write); signals user-error on fail."
   (sops--encrypt-and-write))
 
+(defun sops--retry-decrypt-on-revert (&rest _args)
+  "Retry sops decrypt as a `revert-buffer-function' after initial failure.
+Installed in `sops--find-file-hook' when the first `sops--decrypt-buffer'
+call exits non-zero -- without this hook, `revert-buffer' would fall
+through to the default implementation which just re-reads the encrypted
+bytes and never re-invokes sops, so the recovery hint printed into
+`*sops-error:*' (\"fix auth, then M-x revert-buffer\") would be a lie.
+
+Re-reads the encrypted file from disk (in case the user also fixed
+things externally) and re-runs `sops--decrypt-buffer'.  On success,
+disables `read-only-mode' and enables `sops-mode' -- enabling sops-mode
+installs the real `sops--revert-buffer' for subsequent reverts, so this
+retry function only runs as long as decrypt keeps failing.  On
+continued failure, `sops--decrypt-buffer' pops the error buffer again
+and the buffer stays read-only with ciphertext."
+  (save-restriction
+    (widen)
+    (set-visited-file-modtime)
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (insert-file-contents buffer-file-name)))
+  (set-buffer-modified-p nil)
+  (when (sops--decrypt-buffer)
+    (read-only-mode -1)
+    ;; Pre-set state so the `sops-mode' enable guard skips its own
+    ;; `sops--filestatus' re-check -- we just decrypted, the file is
+    ;; sops-encrypted by definition.
+    (setq sops--state (sops-state-create :status 'decrypted))
+    (sops-mode 1)))
+
 (defun sops--revert-buffer (&rest _args)
   "Revert function for sops-mode buffers: re-read encrypted file and decrypt.
 Widens before erasing so a narrowed buffer doesn't corrupt itself with
@@ -353,25 +383,35 @@ Plaintext never reaches disk (backups and auto-save are suppressed)."
   :group 'sops
   (cond
    (sops-mode
+    ;; Refuse to enable on a buffer whose visited file isn't sops-encrypted.
+    ;; `sops--find-file-hook' and `sops--retry-decrypt-on-revert' both
+    ;; validate via `sops--filestatus' + a successful decrypt before
+    ;; reaching here, so they pre-set `sops--state' to signal "trust me".
+    ;; This guard catches manual `M-x sops-mode' on a regular buffer,
+    ;; which would otherwise install encrypt-on-save hooks that fail at
+    ;; save time -- and the disable branch's modified-buffer guardrail
+    ;; would then trap the user with no clean escape.
     (unless sops--state
+      (unless (and buffer-file-name
+                   (not (file-remote-p buffer-file-name))
+                   (sops--filestatus buffer-file-name))
+        (setq sops-mode nil)
+        (user-error "sops-mode: %s is not a sops-encrypted file"
+                    (or buffer-file-name "this buffer")))
       (setq sops--state (sops-state-create :status 'decrypted)))
     (setq-local make-backup-files nil)
     (setq-local buffer-auto-save-file-name nil)
     (setq-local revert-buffer-function #'sops--revert-buffer)
     (add-hook 'write-contents-functions #'sops--write-contents-function nil t)
     ;; External writes (magit discard, git checkout, sops -e from CLI) update
-    ;; the file behind our back.  auto-revert-mode polls the modtime and
-    ;; calls `revert-buffer-function' (= `sops--revert-buffer') when it
-    ;; changes -- so the user sees the new ciphertext re-decrypted instead
-    ;; of a stale buffer + the "really edit?" prompt.
-    ;;
-    ;; Disable file-notify (kqueue/inotify) and rely on polling: file-notify
-    ;; fires asynchronously inside `accept-process-output', which is exactly
-    ;; the blocking-loop primitive `sops--run' uses to wait for sops -- so a
-    ;; notify-driven revert during an active sops subprocess could recurse
-    ;; into another `sops--run' nested inside the first.  Polling fires only
-    ;; on its own timer (default 5 s), well outside any single subprocess.
-    (setq-local auto-revert-use-notify nil)
+    ;; the file behind our back.  auto-revert-mode picks them up and calls
+    ;; `revert-buffer-function' (= `sops--revert-buffer') so the user sees
+    ;; the new ciphertext re-decrypted instead of a stale buffer + the
+    ;; "really edit?" prompt.  Defaults to file-notify (kqueue/inotify) when
+    ;; available, falling back to polling.  See test/sops-test.el for why
+    ;; batch tests force polling (the interactive main loop drains queued
+    ;; events between commands; batch does not, and that deadlocks the next
+    ;; `sops--run').
     (auto-revert-mode 1)
     ;; Inhibit apheleia (and any future formatters that respect this var
     ;; convention).  Two reasons: (1) apheleia's before-save formatter runs
@@ -411,7 +451,6 @@ function checks for that surviving flag and re-installs the rest."
     (setq-local revert-buffer-function #'sops--revert-buffer)
     (add-hook 'write-contents-functions
               #'sops--write-contents-function nil t)
-    (setq-local auto-revert-use-notify nil)
     (auto-revert-mode 1)
     (setq-local apheleia-inhibit t)))
 
@@ -430,7 +469,31 @@ paths.  Remote support belongs in the separate `tramp-sops' package."
         (when (sops--ensure-version)
           (when (sops--filestatus buffer-file-name)
             (if (sops--decrypt-buffer)
-                (sops-mode 1)
+                (progn
+                  ;; Pre-set state so the `sops-mode' enable guard skips
+                  ;; its own `sops--filestatus' re-check -- we just
+                  ;; validated above and ran decrypt successfully.
+                  (setq sops--state
+                        (sops-state-create :status 'decrypted))
+                  (sops-mode 1))
+              ;; Decrypt failed: park the retry function on
+              ;; `revert-buffer-function' so the popped error buffer's
+              ;; "M-x revert-buffer to retry" hint actually works.  On
+              ;; successful retry, sops-mode activation replaces this with
+              ;; the real `sops--revert-buffer'.
+              (setq-local revert-buffer-function
+                          #'sops--retry-decrypt-on-revert)
+              ;; Emacs 30 added `revert-buffer-restore-functions', whose
+              ;; default member `revert-buffer-restore-read-only' snapshots
+              ;; `buffer-read-only' before the revert function runs and
+              ;; restores it after.  That would undo the `(read-only-mode
+              ;; -1)' our retry function does on successful re-decrypt --
+              ;; the buffer would re-decrypt cleanly but stay read-only.
+              ;; Clear the buffer-local list so the retry's state changes
+              ;; persist; on Emacs <30 the symbol is unbound and the
+              ;; `boundp' guard keeps the byte-compiler quiet.
+              (when (boundp 'revert-buffer-restore-functions)
+                (setq-local revert-buffer-restore-functions nil))
               (read-only-mode 1))))
       (user-error
        ;; sops missing or too old: log once, do nothing
