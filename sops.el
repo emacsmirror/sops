@@ -36,7 +36,15 @@
 (cl-defstruct (sops-state (:constructor sops-state-create)
                           (:conc-name sops-state-))
   "Buffer-local state for sops-mode."
-  status        ; 'decrypted | 'creating
+  ;; status:
+  ;;   'decrypted -- set by sops--find-file-hook after a successful decrypt,
+  ;;                 or by sops--encrypt-and-write after the first save of a
+  ;;                 'creating buffer; the buffer represents an on-disk
+  ;;                 ciphertext file the user is editing in plaintext.
+  ;;   'creating  -- set by sops--start-creation when sops-find-file visits
+  ;;                 a non-existent path; the on-disk file does not exist
+  ;;                 yet and is created by the first encrypt-and-write.
+  status
   last-error)   ; nil or string with most recent sops stderr
 
 (defgroup sops nil
@@ -365,7 +373,11 @@ modtime check (used by `verify-visited-file-modtime') matches the
 file we just wrote.  Without this, the next edit triggers a
 \"FILE has changed on disk; really edit the buffer?\" prompt
 because `find-file' recorded the *encrypted* file's modtime and
-our write replaced it."
+our write replaced it.
+
+On the first successful save of a `sops-find-file' \\='creating
+buffer, transitions `sops--state.status' to \\='decrypted so
+subsequent saves and reverts follow the normal v0.2 paths."
   (run-hooks 'sops-before-encrypt-hook)
   (let* ((file buffer-file-name)
          (input-type (sops--input-type-for file))
@@ -391,6 +403,12 @@ our write replaced it."
       (write-region stdout nil file nil 'silent))
     (set-visited-file-modtime)
     (set-buffer-modified-p nil)
+    ;; First-save transition for sops-find-file's 'creating buffers.
+    ;; After this, the buffer is indistinguishable from one decrypted
+    ;; via the find-file-hook; reverts go through sops--revert-buffer.
+    (when (and sops--state
+               (eq (sops-state-status sops--state) 'creating))
+      (setf (sops-state-status sops--state) 'decrypted))
     t))
 
 (defvar-local sops--state nil

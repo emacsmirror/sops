@@ -1271,5 +1271,66 @@ content normalized to utf-8-unix."
         (set-buffer-modified-p nil)
         (sops-mode -1)))))
 
+;;; -------- 'creating → 'decrypted transition --------
+
+(ert-deftest sops-test--encrypt-and-write-transitions-creating-to-decrypted ()
+  "Successful first save flips sops--state.status from 'creating to 'decrypted."
+  (sops-test--ensure-fixtures)
+  (let* ((tmp (expand-file-name
+               (format "sops-test-trans-%d.enc.yaml" (random 1000000))
+               sops-test--fixtures)))
+    (unwind-protect
+        (with-temp-buffer
+          (setq buffer-file-name tmp)
+          (setq default-directory (file-name-directory tmp))
+          (insert "hello: from-creating-state\n")
+          (setq sops--state (sops-state-create :status 'creating))
+          (should (eq 'creating (sops-state-status sops--state)))
+          (sops--encrypt-and-write)
+          (should (eq 'decrypted (sops-state-status sops--state)))
+          (should (file-exists-p tmp)))
+      (when (file-exists-p tmp) (delete-file tmp)))))
+
+(ert-deftest sops-test--encrypt-and-write-failed-save-keeps-creating-state ()
+  "Failed first save: state stays 'creating, file not created on disk."
+  (sops-test--ensure-fixtures)
+  ;; Use an extension the fixtures' .sops.yaml creation_rules don't match
+  ;; (path_regex is `\\.enc\\.(yaml|json|env|txt)$').
+  (let* ((tmp (expand-file-name
+               (format "sops-test-failtrans-%d.no-rule" (random 1000000))
+               sops-test--fixtures)))
+    (unwind-protect
+        (with-temp-buffer
+          (setq buffer-file-name tmp)
+          (setq default-directory (file-name-directory tmp))
+          (insert "hello: should-fail\n")
+          (setq sops--state (sops-state-create :status 'creating))
+          (should-error (sops--encrypt-and-write) :type 'user-error)
+          (should (eq 'creating (sops-state-status sops--state)))
+          (should-not (file-exists-p tmp)))
+      (when (file-exists-p tmp) (delete-file tmp)))))
+
+(ert-deftest sops-test--encrypt-and-write-no-transition-when-not-creating ()
+  "Saving a 'decrypted buffer does NOT touch sops--state.status."
+  (sops-test--ensure-fixtures)
+  (let* ((src (sops-test--fixture "secrets.enc.yaml"))
+         (tmp (expand-file-name
+               (format "sops-test-decstate-%d.enc.yaml" (random 1000000))
+               sops-test--fixtures)))
+    (unwind-protect
+        (progn
+          (copy-file src tmp t)
+          (with-temp-buffer
+            (setq buffer-file-name tmp)
+            (setq default-directory (file-name-directory tmp))
+            (insert-file-contents tmp)
+            (sops--decrypt-buffer)
+            (setq sops--state (sops-state-create :status 'decrypted))
+            (goto-char (point-max))
+            (insert "added: 1\n")
+            (sops--encrypt-and-write)
+            (should (eq 'decrypted (sops-state-status sops--state)))))
+      (when (file-exists-p tmp) (delete-file tmp)))))
+
 (provide 'sops-test)
 ;;; sops-test.el ends here
