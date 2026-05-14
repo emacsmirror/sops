@@ -26,7 +26,14 @@ preservation).
 2. Edit normally.
 3. Save with =C-x C-s=. The file on disk stays encrypted.
 
-To create a new encrypted file: see =sops-find-file= in future work (not yet shipped).
+To create a new encrypted file: =M-x sops-find-file /path/to/new.enc.yaml=.
+The buffer is seeded with a SOPS example (mirroring upstream =sops
+<path>=); edit it and save.  Requires a reachable =.sops.yaml= (in the
+path's directory or any ancestor) with a =creation_rules= entry
+matching the path.
+
+If the path already exists, =sops-find-file= behaves identically to
+=find-file= -- the global mode decrypts sops files transparently.
 
 ** Configuration
 
@@ -141,7 +148,6 @@ is a separate decision.
 
 ** Future work
 
-- future work: =M-x sops-find-file= — open existing or create new encrypted file
 - future work: Interactive prompt handling for age PIN, yubikey, passphrase
 
 ** License

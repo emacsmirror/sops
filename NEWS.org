@@ -47,6 +47,12 @@
 - Detection via =sops filestatus= (was content-scan heuristic)
 - New defcustom =sops-input-type-overrides= for files with non-default extensions
 - One-time migration warnings when v1 configuration is detected
+- =M-x sops-find-file=: create new SOPS-encrypted files.  Mirrors
+  =sops <path>= at the CLI: existing paths delegate to =find-file=
+  (transparent decrypt via the v0.2 hook); non-existent paths enter
+  a =creating= state with a sops =EmitExample= stub and encrypt on
+  first save.  Requires =.sops.yaml= reachable in an ancestor of the
+  target path.
 
 ** v1 documentation
 
