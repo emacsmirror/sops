@@ -137,35 +137,60 @@ example_key=example_value
 Mirrors upstream sops's `ExampleSimpleTree' rendering
 (see `stores/ini/store.go:EmitExample').")
 
+(defconst sops--example-txt
+  "hello from emacs sops-mode!
+"
+  "Plain-text stub seeded into new `.txt' buffers by `sops-find-file'.
+`.txt' files use sops's native binary store: the whole buffer is
+encrypted as a single blob (not parsed as yaml/json/etc.), so no
+`sops-input-type-overrides' configuration is required by default.
+
+If you prefer structured content for `.txt' (yaml-shaped keys with
+selective encryption), map the path to \"yaml\" in
+`sops-input-type-overrides'; sops-mode then auto-threads
+`--output-type yaml' (via `sops--maybe-output-type') to work around
+upstream sops's binary-store fallback (see getsops/sops#235).")
+
 (defun sops--example-for (format)
   "Return the stub string for FORMAT, or \"\" if FORMAT is nil/unknown.
-FORMAT is a sops type name string: \"yaml\", \"json\", \"dotenv\", or
-\"ini\".  Any other value (including nil, \"binary\", or arbitrary
-strings) returns the empty string -- the caller is responsible for
-seeding nothing in that case."
+FORMAT is a key string: \"yaml\", \"json\", \"dotenv\", \"ini\", or
+\"txt\".  The first four match sops's native `--input-type' values
+verbatim; \"txt\" is a sops-mode-only key for plain-text files,
+which sops itself doesn't parse -- callers should pair `.txt' paths
+with a `sops-input-type-overrides' entry mapping to a real parser.
+Any other value (including nil, \"binary\", arbitrary strings)
+returns the empty string."
   (pcase format
     ("yaml"   sops--example-yaml)
     ("json"   sops--example-json)
     ("dotenv" sops--example-dotenv)
     ("ini"    sops--example-ini)
+    ("txt"    sops--example-txt)
     (_        "")))
 
 (defun sops--format-for (filename)
-  "Return the sops format string for FILENAME, or nil if unknown.
-Consults `sops-input-type-overrides' first (so user-configured
-mappings win), then falls back to the file extension.  Returns one
-of \"yaml\", \"json\", \"dotenv\", \"ini\", or nil.
+  "Return the `sops--example-for' key for FILENAME, or nil if unknown.
+Standard extensions (\"yaml\"/\"yml\"/\"json\"/\"env\"/\"ini\"/\"txt\") win first
+so a `.txt' file always picks the txt greeting stub, even when the
+user also has a `sops-input-type-overrides' entry mapping the path
+to a sops parser (e.g. for encrypt to succeed).  For non-standard
+extensions like `.secrets', `sops-input-type-overrides' is the
+fallback, mapping the path to one of the recognized stub keys.
 
-Used by `sops-find-file' to pick which `sops--example-for' stub to
-seed; the returned string is also the value sops itself accepts
-for `--input-type'."
-  (or (sops--input-type-for filename)
-      (let ((ext (and filename (file-name-extension filename))))
-        (pcase ext
+Returns one of \"yaml\", \"json\", \"dotenv\", \"ini\", \"txt\", or
+nil.  The first four are also valid sops `--input-type' values;
+\"txt\" is sops-mode-only -- sops itself doesn't parse a `txt'
+input-type, so `.txt' creators must configure
+`sops-input-type-overrides' (e.g. `(\"\\\\.enc\\\\.txt\\\\'\" . \"yaml\")') for
+encrypt to succeed."
+  (let ((ext (and filename (file-name-extension filename))))
+    (or (pcase ext
           ((or "yaml" "yml") "yaml")
           ("json"            "json")
           ("env"             "dotenv")
-          ("ini"             "ini")))))
+          ("ini"             "ini")
+          ("txt"             "txt"))
+        (sops--input-type-for filename))))
 
 (defun sops--parse-filestatus (json-string)
   "Parse JSON-STRING from `sops filestatus'.
@@ -329,6 +354,25 @@ The hook fires unconditionally before `sops--run'."
   :type 'hook
   :group 'sops)
 
+(defun sops--maybe-output-type (input-type existing-args)
+  "Return `(\"--output-type\" INPUT-TYPE)' to thread into a sops call, or nil.
+Workaround for upstream sops bug: when `--input-type' overrides a
+non-native extension (e.g. `.txt'), sops picks the *output* store
+independently from the filename and falls back to the binary store,
+which then can't dump a structured tree -- the user sees
+\"error emitting binary store: no binary data found in tree\".  See
+getsops/sops#235 (closed without a code fix; the maintainers added
+the error hint instead of inferring output-type from input-type).
+
+Returns the pair only when INPUT-TYPE is non-nil and EXISTING-ARGS
+doesn't already contain `--output-type' (so a user who explicitly
+sets one wins).  EXISTING-ARGS is the full args list this call is
+being threaded into (`sops-decrypt-args' for decrypt,
+`sops-extra-encrypt-args' for encrypt)."
+  (when (and input-type
+             (not (member "--output-type" existing-args)))
+    (list "--output-type" input-type)))
+
 (defun sops--decrypt-buffer ()
   "Decrypt current buffer's file via sops, replacing buffer contents.
 Return t on success, nil on failure (popping an error buffer).
@@ -338,6 +382,7 @@ Caller must have set `buffer-file-name' to the encrypted file path."
          (input-type (sops--input-type-for file))
          (args (append sops-decrypt-args
                        (when input-type (list "--input-type" input-type))
+                       (sops--maybe-output-type input-type sops-decrypt-args)
                        (list file)))
          (result (sops--run args))
          (exit (plist-get result :exit-status)))
@@ -384,6 +429,8 @@ subsequent saves and reverts follow the normal v0.2 paths."
          (args (append '("encrypt" "--filename-override")
                        (list file)
                        (when input-type (list "--input-type" input-type))
+                       (sops--maybe-output-type
+                        input-type sops-extra-encrypt-args)
                        sops-extra-encrypt-args))
          (result (sops--run args :input (save-restriction
                                           (widen)

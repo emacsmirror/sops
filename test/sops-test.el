@@ -106,10 +106,14 @@ plus a plaintext negative-test sample."
                    (sops-test--encrypt-string
                     "DB_PASSWORD=super-secret-env\nAPI_KEY=env-abc-123\n"
                     "vars.enc.env"))
+          ;; .txt fixture uses sops's native binary store (no --input-type)
+          ;; -- matches what `sops-find-file' produces by default and what
+          ;; upstream's own example.txt looks like, so the fixture exercises
+          ;; the natural user flow rather than the override path.
           (funcall write (expand-file-name "notes.enc.txt" sops-test--fixtures)
                    (sops-test--encrypt-string
-                    "secret_token: txt-fixture-token\n"
-                    "notes.enc.txt" "yaml"))
+                    "secret note from a txt fixture\n"
+                    "notes.enc.txt"))
           (funcall write (expand-file-name "plain.yaml" sops-test--fixtures)
                    "not: a-sops-file\njust: plain-yaml\n"))))
     (setq sops-test--fixtures-ready t)))
@@ -293,11 +297,11 @@ Locks the contract that sops--run does not silently swallow exec failures."
 (ert-deftest sops-test--filestatus-encrypted-env ()
   (should (eq t (sops--filestatus (sops-test--fixture "vars.enc.env")))))
 
-(ert-deftest sops-test--filestatus-encrypted-txt-needs-input-type ()
-  "TXT fixture requires sops-input-type-overrides for sops to know format."
-  (let ((sops-input-type-overrides
-         '(("notes\\.enc\\.txt\\'" . "yaml"))))
-    (should (eq t (sops--filestatus (sops-test--fixture "notes.enc.txt"))))))
+(ert-deftest sops-test--filestatus-encrypted-txt ()
+  "TXT fixture (binary-store encoded): filestatus works with no overrides.
+sops's `FormatForPath' returns Binary for unknown extensions, so the
+binary store handles `.txt' end-to-end without `sops-input-type-overrides'."
+  (should (eq t (sops--filestatus (sops-test--fixture "notes.enc.txt")))))
 
 (ert-deftest sops-test--filestatus-plaintext-fixture ()
   (should (eq nil (sops--filestatus (sops-test--fixture "plain.yaml")))))
@@ -1206,6 +1210,15 @@ content normalized to utf-8-unix."
     (should (string-match-p "\\[Welcome!\\]" s))
     (should (string-match-p "hello=" s))))
 
+(ert-deftest sops-test--example-txt-content ()
+  "txt stub greets the user from emacs sops-mode.
+Bare text (no `hello:' key prefix) -- `.txt' files use sops's
+native binary store, not yaml parsing."
+  (let ((s (sops--example-for "txt")))
+    (should (stringp s))
+    (should (string-match-p "hello from emacs sops-mode" s))
+    (should-not (string-match-p "^hello:" s))))
+
 (ert-deftest sops-test--example-unknown-empty ()
   "Unknown / nil formats return the empty string (caller's responsibility)."
   (should (equal "" (sops--example-for nil)))
@@ -1219,7 +1232,7 @@ content normalized to utf-8-unix."
   (should (equal "json"   (sops--format-for "/tmp/x.json")))
   (should (equal "dotenv" (sops--format-for "/tmp/x.env")))
   (should (equal "ini"    (sops--format-for "/tmp/x.ini")))
-  (should (eq nil (sops--format-for "/tmp/x.txt")))
+  (should (equal "txt"    (sops--format-for "/tmp/x.txt")))
   (should (eq nil (sops--format-for "/tmp/x.unknown")))
   (should (eq nil (sops--format-for nil))))
 
@@ -1229,6 +1242,29 @@ content normalized to utf-8-unix."
     (should (equal "yaml" (sops--format-for "/tmp/x.secrets")))
     ;; Extension fallback still works for non-overridden paths.
     (should (equal "json" (sops--format-for "/tmp/x.json")))))
+
+;;; -------- sops--maybe-output-type --------
+
+(ert-deftest sops-test--maybe-output-type-nil-input ()
+  "Returns nil when no input-type override is in play."
+  (should (eq nil (sops--maybe-output-type nil '()))))
+
+(ert-deftest sops-test--maybe-output-type-yaml ()
+  "Returns (--output-type yaml) when input-type is yaml and args don't set one."
+  (should (equal '("--output-type" "yaml")
+                 (sops--maybe-output-type "yaml" '("decrypt")))))
+
+(ert-deftest sops-test--maybe-output-type-respects-existing ()
+  "Returns nil when EXISTING-ARGS already has --output-type (user wins)."
+  (should (eq nil (sops--maybe-output-type
+                   "yaml" '("decrypt" "--output-type" "json")))))
+
+(ert-deftest sops-test--maybe-output-type-passes-through-type ()
+  "Echoes the input-type back (so callers don't have to map yaml→yaml etc.)."
+  (should (equal '("--output-type" "json")
+                 (sops--maybe-output-type "json" '())))
+  (should (equal '("--output-type" "dotenv")
+                 (sops--maybe-output-type "dotenv" '()))))
 
 ;;; -------- sops--start-creation --------
 
@@ -1507,6 +1543,42 @@ File is NOT created on disk until the first successful save."
             (insert-file-contents tmp)
             (sops--decrypt-buffer)
             (should (string-match-p "MY_NEW_SECRET=dotenv-rt" (buffer-string)))))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (setq sops--state (sops-state-create :status 'decrypted))
+          (set-buffer-modified-p nil))
+        (kill-buffer buf))
+      (when (file-exists-p tmp) (delete-file tmp)))))
+
+(ert-deftest sops-test--find-file-txt-roundtrip ()
+  "TXT roundtrip via sops's native binary store: no overrides needed.
+Bare text in / bare text out -- the whole buffer is treated as a
+single binary blob by sops, no `sops-input-type-overrides' or
+`--output-type' configuration required."
+  (sops-test--ensure-fixtures)
+  (let ((tmp (expand-file-name
+              (format "sops-test-rt-txt-%d.enc.txt" (random 1000000))
+              sops-test--fixtures))
+        (buf nil))
+    (unwind-protect
+        (progn
+          (sops-find-file tmp)
+          (setq buf (current-buffer))
+          ;; Stub is the unmodified greeting; save it as-is.
+          (should (string-match-p "hello from emacs sops-mode"
+                                  (buffer-string)))
+          (sops--encrypt-and-write)
+          (should (file-exists-p tmp))
+          (should (eq 'decrypted (sops-state-status sops--state)))
+          (kill-buffer buf)
+          (setq buf nil)
+          (with-temp-buffer
+            (setq buffer-file-name tmp)
+            (setq default-directory (file-name-directory tmp))
+            (insert-file-contents tmp)
+            (sops--decrypt-buffer)
+            (should (string-match-p "hello from emacs sops-mode"
+                                    (buffer-string)))))
       (when (buffer-live-p buf)
         (with-current-buffer buf
           (setq sops--state (sops-state-create :status 'decrypted))
