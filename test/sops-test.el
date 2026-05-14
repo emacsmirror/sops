@@ -1230,5 +1230,46 @@ content normalized to utf-8-unix."
     ;; Extension fallback still works for non-overridden paths.
     (should (equal "json" (sops--format-for "/tmp/x.json")))))
 
+;;; -------- sops--start-creation --------
+
+(ert-deftest sops-test--start-creation-seeds-yaml ()
+  "After sops--start-creation, buffer has the yaml stub, state='creating, mode on."
+  (with-temp-buffer
+    (setq buffer-file-name
+          (expand-file-name (format "sops-test-start-%d.yaml" (random 1000000))
+                            temporary-file-directory))
+    (unwind-protect
+        (progn
+          (sops--start-creation "yaml")
+          (should (string-match-p "hello: Welcome to SOPS" (buffer-string)))
+          (should sops--state)
+          (should (eq 'creating (sops-state-status sops--state)))
+          (should sops-mode)
+          (should-not (buffer-modified-p)))
+      ;; Cleanup: turn off mode before letting the buffer die so the
+      ;; mode's deactivation guard doesn't bark on the temp buffer.
+      (when sops-mode
+        (setq sops--state (sops-state-create :status 'decrypted))
+        (set-buffer-modified-p nil)
+        (sops-mode -1)))))
+
+(ert-deftest sops-test--start-creation-empty-for-unknown-format ()
+  "Unknown format yields an empty buffer + still enables sops-mode."
+  (with-temp-buffer
+    (setq buffer-file-name
+          (expand-file-name (format "sops-test-unk-%d.unknown" (random 1000000))
+                            temporary-file-directory))
+    (unwind-protect
+        (progn
+          (sops--start-creation nil)
+          (should (equal "" (buffer-string)))
+          (should (eq 'creating (sops-state-status sops--state)))
+          (should sops-mode)
+          (should-not (buffer-modified-p)))
+      (when sops-mode
+        (setq sops--state (sops-state-create :status 'decrypted))
+        (set-buffer-modified-p nil)
+        (sops-mode -1)))))
+
 (provide 'sops-test)
 ;;; sops-test.el ends here

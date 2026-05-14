@@ -542,6 +542,28 @@ function checks for that surviving flag and re-installs the rest."
 (add-hook 'after-change-major-mode-hook
           #'sops--restore-after-major-mode-change)
 
+(defun sops--start-creation (format)
+  "Seed current buffer with FORMAT's stub and enable `sops-mode' in 'creating state.
+FORMAT is a sops type name; see `sops--example-for' for accepted values.
+
+`buffer-file-name' must already be set (caller has typically just
+called `find-file' on a non-existent path).  This helper:
+
+  1. Erases the buffer and inserts the matching stub.
+  2. Marks the buffer unmodified -- the example is not user edits.
+  3. Pre-sets `sops--state' to `'creating' so the `sops-mode' enable
+     guard skips its filestatus check (the file doesn't exist yet).
+  4. Enables `sops-mode'.
+
+On first successful save, `sops--encrypt-and-write' will transition
+`sops--state.status' from `'creating' to `'decrypted'."
+  (let ((stub (sops--example-for format)))
+    (erase-buffer)
+    (insert stub))
+  (set-buffer-modified-p nil)
+  (setq sops--state (sops-state-create :status 'creating))
+  (sops-mode 1))
+
 (defun sops--find-file-hook ()
   "On find-file: if file matches prefilter and is sops-encrypted, decrypt.
 Skips remote (TRAMP) files in v0.2 — local sops binary cannot read TRAMP
