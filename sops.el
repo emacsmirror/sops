@@ -657,5 +657,52 @@ Kept only as a special variable so v1 configs can be detected at
         (add-hook 'find-file-hook #'sops--find-file-hook))
     (remove-hook 'find-file-hook #'sops--find-file-hook)))
 
+;;;###autoload
+(defun sops-find-file (path)
+  "Visit PATH; if PATH does not exist, create it as a new SOPS-encrypted file.
+
+For existing paths this delegates to `find-file' -- the v0.2
+`find-file-hook' handles transparent decryption when `global-sops-mode'
+is active.
+
+For non-existent paths, signals `user-error' before any buffer is
+created if:
+  - PATH is empty, or names a directory (ends in `/');
+  - PATH is remote (TRAMP);
+  - PATH's parent directory does not exist;
+  - no `.sops.yaml' is reachable in any ancestor of PATH's parent;
+  - sops binary is missing or older than 3.9.0.
+
+Otherwise visits PATH (which creates an empty buffer with no file on
+disk yet), seeds it with a format-appropriate SOPS example -- ported
+from upstream sops's `EmitExample' -- and enables `sops-mode' in
+`'creating' state.  On the first successful `save-buffer', sops
+encrypts the buffer's contents to PATH and the buffer transitions
+to the normal `'decrypted' state.
+
+Interactive: prompts via `read-file-name'."
+  (interactive (list (read-file-name "Find SOPS file: ")))
+  (when (string-empty-p path)
+    (user-error "sops-find-file: not a file path: %s" path))
+  (let ((path (expand-file-name path)))
+    (when (directory-name-p path)
+      (user-error "sops-find-file: not a file path: %s" path))
+    (when (file-remote-p path)
+      (user-error "sops-find-file: remote paths not supported: %s" path))
+    (if (file-exists-p path)
+        (find-file path)
+      (let ((parent (file-name-directory path)))
+        (unless (and parent (file-exists-p parent))
+          (user-error "sops-find-file: parent directory does not exist: %s"
+                      parent))
+        (unless (locate-dominating-file parent ".sops.yaml")
+          (user-error
+           "sops-find-file: no .sops.yaml found in any ancestor of %s"
+           parent))
+        (sops--ensure-version)
+        (let ((format (sops--format-for path)))
+          (find-file path)
+          (sops--start-creation format))))))
+
 (provide 'sops)
 ;;; sops.el ends here

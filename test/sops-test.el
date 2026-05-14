@@ -1332,5 +1332,187 @@ content normalized to utf-8-unix."
             (should (eq 'decrypted (sops-state-status sops--state)))))
       (when (file-exists-p tmp) (delete-file tmp)))))
 
+;;; -------- sops-find-file --------
+
+(ert-deftest sops-test--find-file-rejects-remote ()
+  "Remote PATH signals user-error before any I/O."
+  (should-error (sops-find-file "/ssh:nohost:/tmp/x.yaml") :type 'user-error))
+
+(ert-deftest sops-test--find-file-rejects-missing-parent ()
+  "Path under a non-existent parent dir signals user-error."
+  (should-error
+   (sops-find-file "/no/such/directory/at/all/secrets.enc.yaml")
+   :type 'user-error))
+
+(ert-deftest sops-test--find-file-rejects-no-sops-yaml ()
+  "Path under a fresh tempdir with no reachable .sops.yaml signals user-error.
+Assumes the test runner's filesystem has no .sops.yaml at / or
+intermediate ancestors of `temporary-file-directory'."
+  (let ((dir (make-temp-file "sops-test-noconfig-" t)))
+    (unwind-protect
+        (progn
+          (should-not (locate-dominating-file dir ".sops.yaml"))
+          (should-error
+           (sops-find-file (expand-file-name "secrets.enc.yaml" dir))
+           :type 'user-error))
+      (delete-directory dir t))))
+
+(ert-deftest sops-test--find-file-rejects-empty-string ()
+  "Empty PATH signals user-error before any I/O."
+  (should-error (sops-find-file "") :type 'user-error))
+
+(ert-deftest sops-test--find-file-rejects-directory ()
+  "A path ending in `/' (a directory) signals user-error."
+  (let ((dir (make-temp-file "sops-test-dir-" t)))
+    (unwind-protect
+        (should-error
+         (sops-find-file (file-name-as-directory dir))
+         :type 'user-error)
+      (delete-directory dir t))))
+
+(ert-deftest sops-test--find-file-existing-path-delegates ()
+  "Existing PATH: sops-find-file calls find-file (buffer visits the file).
+Hooks are disabled so this isolates delegation from the decrypt flow
+covered in sops-test--find-file-existing-encrypted-decrypts."
+  (let ((file (sops-test--fixture "secrets.enc.yaml"))
+        (find-file-hook nil))
+    (sops-find-file file)
+    (unwind-protect
+        (should (equal (expand-file-name file) buffer-file-name))
+      (kill-buffer (current-buffer)))))
+
+(ert-deftest sops-test--find-file-existing-encrypted-decrypts ()
+  "Existing encrypted PATH with the v0.2 hook active: decrypts to 'decrypted.
+Installs `sops--find-file-hook' explicitly (rather than activating
+`global-sops-mode') so the test is hermetic."
+  (let* ((file (sops-test--fixture "secrets.enc.yaml"))
+         (find-file-hook (cons #'sops--find-file-hook find-file-hook)))
+    (sops-find-file file)
+    (unwind-protect
+        (progn
+          (should sops-mode)
+          (should sops--state)
+          (should (eq 'decrypted (sops-state-status sops--state)))
+          (should (string-match-p "database_password" (buffer-string))))
+      (set-buffer-modified-p nil)
+      (kill-buffer (current-buffer)))))
+
+(ert-deftest sops-test--find-file-creates-new-yaml ()
+  "Non-existent .enc.yaml: buffer holds yaml stub, state='creating, mode on.
+File is NOT created on disk until the first successful save."
+  (sops-test--ensure-fixtures)
+  (let ((tmp (expand-file-name
+              (format "sops-test-new-%d.enc.yaml" (random 1000000))
+              sops-test--fixtures))
+        (buf nil))
+    (unwind-protect
+        (progn
+          (sops-find-file tmp)
+          (setq buf (current-buffer))
+          (should (eq 'creating (sops-state-status sops--state)))
+          (should sops-mode)
+          (should-not (buffer-modified-p))
+          (should (string-match-p "hello: Welcome to SOPS" (buffer-string)))
+          (should-not (file-exists-p tmp)))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (setq sops--state (sops-state-create :status 'decrypted))
+          (set-buffer-modified-p nil))
+        (kill-buffer buf))
+      (when (file-exists-p tmp) (delete-file tmp)))))
+
+(ert-deftest sops-test--find-file-yaml-roundtrip ()
+  "Full happy path: sops-find-file → edit → save → reopen → matches."
+  (sops-test--ensure-fixtures)
+  (let ((tmp (expand-file-name
+              (format "sops-test-rt-yaml-%d.enc.yaml" (random 1000000))
+              sops-test--fixtures))
+        (buf nil))
+    (unwind-protect
+        (progn
+          (sops-find-file tmp)
+          (setq buf (current-buffer))
+          (goto-char (point-max))
+          (insert "my_new_secret: round-trip-value\n")
+          (sops--encrypt-and-write)
+          (should (file-exists-p tmp))
+          (should (eq 'decrypted (sops-state-status sops--state)))
+          (kill-buffer buf)
+          (setq buf nil)
+          (with-temp-buffer
+            (setq buffer-file-name tmp)
+            (setq default-directory (file-name-directory tmp))
+            (insert-file-contents tmp)
+            (sops--decrypt-buffer)
+            (should (string-match-p "my_new_secret: round-trip-value"
+                                    (buffer-string)))))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (setq sops--state (sops-state-create :status 'decrypted))
+          (set-buffer-modified-p nil))
+        (kill-buffer buf))
+      (when (file-exists-p tmp) (delete-file tmp)))))
+
+(ert-deftest sops-test--find-file-json-roundtrip ()
+  "JSON roundtrip: create-from-stub → save → reopen verifies."
+  (sops-test--ensure-fixtures)
+  (let ((tmp (expand-file-name
+              (format "sops-test-rt-json-%d.enc.json" (random 1000000))
+              sops-test--fixtures))
+        (buf nil))
+    (unwind-protect
+        (progn
+          (sops-find-file tmp)
+          (setq buf (current-buffer))
+          ;; Replace the stub with minimal valid JSON containing a marker.
+          (erase-buffer)
+          (insert "{\"my_new_secret\": \"json-rt\"}\n")
+          (sops--encrypt-and-write)
+          (should (file-exists-p tmp))
+          (kill-buffer buf)
+          (setq buf nil)
+          (with-temp-buffer
+            (setq buffer-file-name tmp)
+            (setq default-directory (file-name-directory tmp))
+            (insert-file-contents tmp)
+            (sops--decrypt-buffer)
+            (should (string-match-p "json-rt" (buffer-string)))))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (setq sops--state (sops-state-create :status 'decrypted))
+          (set-buffer-modified-p nil))
+        (kill-buffer buf))
+      (when (file-exists-p tmp) (delete-file tmp)))))
+
+(ert-deftest sops-test--find-file-dotenv-roundtrip ()
+  "Dotenv roundtrip: create-from-stub → save → reopen verifies."
+  (sops-test--ensure-fixtures)
+  (let ((tmp (expand-file-name
+              (format "sops-test-rt-env-%d.enc.env" (random 1000000))
+              sops-test--fixtures))
+        (buf nil))
+    (unwind-protect
+        (progn
+          (sops-find-file tmp)
+          (setq buf (current-buffer))
+          (erase-buffer)
+          (insert "MY_NEW_SECRET=dotenv-rt\n")
+          (sops--encrypt-and-write)
+          (should (file-exists-p tmp))
+          (kill-buffer buf)
+          (setq buf nil)
+          (with-temp-buffer
+            (setq buffer-file-name tmp)
+            (setq default-directory (file-name-directory tmp))
+            (insert-file-contents tmp)
+            (sops--decrypt-buffer)
+            (should (string-match-p "MY_NEW_SECRET=dotenv-rt" (buffer-string)))))
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (setq sops--state (sops-state-create :status 'decrypted))
+          (set-buffer-modified-p nil))
+        (kill-buffer buf))
+      (when (file-exists-p tmp) (delete-file tmp)))))
+
 (provide 'sops-test)
 ;;; sops-test.el ends here
