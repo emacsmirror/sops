@@ -1172,5 +1172,63 @@ content normalized to utf-8-unix."
         (kill-buffer buf)
         (delete-file tmp)))))
 
+;;; -------- sops--example-for / sops--format-for --------
+
+(ert-deftest sops-test--example-yaml-content ()
+  "yaml stub contains ExampleComplexTree fields (parity with upstream)."
+  (let ((s (sops--example-for "yaml")))
+    (should (stringp s))
+    (should (> (length s) 0))
+    (should (string-match-p "hello: Welcome to SOPS" s))
+    (should (string-match-p "example_key: example_value" s))
+    (should (string-match-p "example_array" s))
+    (should (string-match-p "example_number: 1234.56789" s))
+    (should (string-match-p "example_booleans" s))))
+
+(ert-deftest sops-test--example-json-parses ()
+  "json stub parses as valid JSON and has the expected top-level keys."
+  (let* ((s (sops--example-for "json"))
+         (parsed (json-parse-string s :object-type 'alist)))
+    (should (equal "Welcome to SOPS! Edit this file as you please!"
+                   (cdr (assq 'hello parsed))))
+    (should (equal "example_value"
+                   (cdr (assq 'example_key parsed))))
+    (should (vectorp (cdr (assq 'example_array parsed))))))
+
+(ert-deftest sops-test--example-dotenv-content ()
+  "dotenv stub contains the example_key=example_value pair."
+  (let ((s (sops--example-for "dotenv")))
+    (should (string-match-p "example_key=example_value" s))))
+
+(ert-deftest sops-test--example-ini-content ()
+  "ini stub contains the [Welcome!] section header and hello key."
+  (let ((s (sops--example-for "ini")))
+    (should (string-match-p "\\[Welcome!\\]" s))
+    (should (string-match-p "hello=" s))))
+
+(ert-deftest sops-test--example-unknown-empty ()
+  "Unknown / nil formats return the empty string (caller's responsibility)."
+  (should (equal "" (sops--example-for nil)))
+  (should (equal "" (sops--example-for "binary")))
+  (should (equal "" (sops--example-for "unknown-type"))))
+
+(ert-deftest sops-test--format-for-extensions ()
+  "Extension-driven format detection."
+  (should (equal "yaml"   (sops--format-for "/tmp/x.yaml")))
+  (should (equal "yaml"   (sops--format-for "/tmp/x.yml")))
+  (should (equal "json"   (sops--format-for "/tmp/x.json")))
+  (should (equal "dotenv" (sops--format-for "/tmp/x.env")))
+  (should (equal "ini"    (sops--format-for "/tmp/x.ini")))
+  (should (eq nil (sops--format-for "/tmp/x.txt")))
+  (should (eq nil (sops--format-for "/tmp/x.unknown")))
+  (should (eq nil (sops--format-for nil))))
+
+(ert-deftest sops-test--format-for-respects-overrides ()
+  "sops-input-type-overrides takes precedence over the extension fallback."
+  (let ((sops-input-type-overrides '(("\\.secrets\\'" . "yaml"))))
+    (should (equal "yaml" (sops--format-for "/tmp/x.secrets")))
+    ;; Extension fallback still works for non-overridden paths.
+    (should (equal "json" (sops--format-for "/tmp/x.json")))))
+
 (provide 'sops-test)
 ;;; sops-test.el ends here

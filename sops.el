@@ -76,6 +76,89 @@ Pairs in the alist are tried in list order; the first match wins."
     (cdr (cl-find-if (lambda (pair) (string-match-p (car pair) filename))
                      sops-input-type-overrides))))
 
+(defconst sops--example-yaml
+  "hello: Welcome to SOPS! Edit this file as you please!
+example_key: example_value
+# Example comment
+example_array:
+    - example_value1
+    - example_value2
+example_number: 1234.56789
+example_booleans:
+    - true
+    - false
+"
+  "YAML stub seeded into new buffers by `sops-find-file'.
+Mirrors upstream sops's `ExampleComplexTree' rendering
+(see `stores/yaml/store.go:EmitExample').")
+
+(defconst sops--example-json
+  "{
+    \"hello\": \"Welcome to SOPS! Edit this file as you please!\",
+    \"example_key\": \"example_value\",
+    \"example_array\": [
+        \"example_value1\",
+        \"example_value2\"
+    ],
+    \"example_number\": 1234.56789,
+    \"example_booleans\": [
+        true,
+        false
+    ]
+}
+"
+  "JSON stub seeded into new buffers by `sops-find-file'.
+Mirrors upstream sops's `ExampleComplexTree' rendering
+(see `stores/json/store.go:EmitExample').")
+
+(defconst sops--example-dotenv
+  "# Welcome to SOPS! Edit this file as you please!
+example_key=example_value
+"
+  "Dotenv stub seeded into new buffers by `sops-find-file'.
+Mirrors upstream sops's dotenv example rendering
+(see `stores/dotenv/store.go:EmitExample').")
+
+(defconst sops--example-ini
+  "[Welcome!]
+; This is an example file.
+hello=Welcome to SOPS! Edit this file as you please!
+example_key=example_value
+"
+  "INI stub seeded into new buffers by `sops-find-file'.
+Mirrors upstream sops's `ExampleSimpleTree' rendering
+(see `stores/ini/store.go:EmitExample').")
+
+(defun sops--example-for (format)
+  "Return the stub string for FORMAT, or \"\" if FORMAT is nil/unknown.
+FORMAT is a sops type name string: \"yaml\", \"json\", \"dotenv\", or
+\"ini\".  Any other value (including nil, \"binary\", or arbitrary
+strings) returns the empty string -- the caller is responsible for
+seeding nothing in that case."
+  (pcase format
+    ("yaml"   sops--example-yaml)
+    ("json"   sops--example-json)
+    ("dotenv" sops--example-dotenv)
+    ("ini"    sops--example-ini)
+    (_        "")))
+
+(defun sops--format-for (filename)
+  "Return the sops format string for FILENAME, or nil if unknown.
+Consults `sops-input-type-overrides' first (so user-configured
+mappings win), then falls back to the file extension.  Returns one
+of \"yaml\", \"json\", \"dotenv\", \"ini\", or nil.
+
+Used by `sops-find-file' to pick which `sops--example-for' stub to
+seed; the returned string is also the value sops itself accepts
+for `--input-type'."
+  (or (sops--input-type-for filename)
+      (let ((ext (and filename (file-name-extension filename))))
+        (pcase ext
+          ((or "yaml" "yml") "yaml")
+          ("json"            "json")
+          ("env"             "dotenv")
+          ("ini"             "ini")))))
+
 (defun sops--parse-filestatus (json-string)
   "Parse JSON-STRING from `sops filestatus'.
 Return t if and only if the parsed object contains the boolean true at
