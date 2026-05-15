@@ -763,15 +763,22 @@ backup/auto-save suppression."
       (kill-buffer buf))))
 
 (ert-deftest sops-test--find-file-hook-skips-non-prefiltered ()
-  "find-file-hook ignores files not matching sops-prefilter-regex."
-  (let ((find-file-hook nil)
-        (tmp (make-temp-file "sops-test-png-" nil ".png")))
+  "find-file-hook ignores files not matching sops-prefilter-regex.
+Uses `with-temp-buffer' + a real on-disk temp file rather than
+`find-file-noselect' on a `.png'.  On Emacs 29.1 the latter routes
+through `auto-mode-alist' → `image-mode', which errors with
+\"Display does not support images\" in batch (29.1's ert binds
+`debug-on-error' to t while running tests, so the `with-demoted-errors'
+wrapper in `normal-mode' doesn't swallow it; 30+ ert switched to
+`signal-hook-function' and the error gets demoted to a message).
+Calling the hook directly on a temp buffer exercises the same
+prefilter rejection path without touching find-file's machinery."
+  (let ((tmp (make-temp-file "sops-test-png-" nil ".png")))
     (unwind-protect
-        (let ((buf (find-file-noselect tmp)))
-          (with-current-buffer buf
-            (sops--find-file-hook)
-            (should-not sops-mode))
-          (kill-buffer buf))
+        (with-temp-buffer
+          (setq buffer-file-name tmp)
+          (sops--find-file-hook)
+          (should-not sops-mode))
       (delete-file tmp))))
 
 (ert-deftest sops-test--find-file-hook-skips-tramp ()

@@ -497,7 +497,10 @@ and the buffer stays read-only with ciphertext."
       (insert-file-contents buffer-file-name)))
   (set-buffer-modified-p nil)
   (when (sops--decrypt-buffer)
-    (read-only-mode -1)
+    ;; Mirror the find-file-hook failure path: set `buffer-read-only'
+    ;; directly so `revert-buffer's read-only state restoration (inline
+    ;; on Emacs 29.1, hook-driven on 30+) leaves us writable.
+    (setq buffer-read-only nil)
     ;; Pre-set state so the `sops-mode' enable guard skips its own
     ;; `sops--filestatus' re-check -- we just decrypted, the file is
     ;; sops-encrypted by definition.
@@ -663,18 +666,17 @@ paths.  Remote support belongs in the separate `tramp-sops' package."
               ;; the real `sops--revert-buffer'.
               (setq-local revert-buffer-function
                           #'sops--retry-decrypt-on-revert)
-              ;; Emacs 30 added `revert-buffer-restore-functions', whose
-              ;; default member `revert-buffer-restore-read-only' snapshots
-              ;; `buffer-read-only' before the revert function runs and
-              ;; restores it after.  That would undo the `(read-only-mode
-              ;; -1)' our retry function does on successful re-decrypt --
-              ;; the buffer would re-decrypt cleanly but stay read-only.
-              ;; Clear the buffer-local list so the retry's state changes
-              ;; persist; on Emacs <30 the symbol is unbound and the
-              ;; `boundp' guard keeps the byte-compiler quiet.
-              (when (boundp 'revert-buffer-restore-functions)
-                (setq-local revert-buffer-restore-functions nil))
-              (read-only-mode 1))))
+              ;; Set `buffer-read-only' directly rather than calling
+              ;; `read-only-mode' so we don't populate
+              ;; `read-only-mode--state'.  `revert-buffer' on Emacs 29.1
+              ;; (inline) and 30+ (`revert-buffer-restore-read-only')
+              ;; both capture that state pre-revert and re-apply
+              ;; `buffer-read-only' from it post-revert, which would
+              ;; undo the `(setq buffer-read-only nil)' our retry path
+              ;; performs on successful re-decrypt.  With the state var
+              ;; left untouched, the captured value is nil and the
+              ;; restoration is a no-op.
+              (setq buffer-read-only t))))
       (user-error
        ;; sops missing or too old: log once, do nothing
        (message "sops: %s" (error-message-string err))))))
