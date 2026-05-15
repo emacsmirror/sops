@@ -13,5 +13,4 @@ jobs:
         with:
           version: ${{ matrix.emacs_version }}
       - run: mise install
-      - run: mise exec -- eask install-deps
       - run: mise exec -- eask test ert ./test/sops-test.el
