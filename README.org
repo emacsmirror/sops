@@ -82,9 +82,9 @@ Example (set =AWS_PROFILE= based on the file's KMS ARN):
 For non-interactive age PIN/passphrase, set =SOPS_AGE_KEY_CMD= in
 =sops-before-decrypt-hook=.
 
-** Migration from v1
+** Migration from v0.1.X
 
-v0.2 is a clean break. If your v1 config used:
+v0.2 is a clean break. If your v0.1.X config used:
 
 #+begin_src elisp
 :bind (("C-c C-c" . sops-save-file)
@@ -100,7 +100,7 @@ If you used =sops-before-encrypt-decrypt-hook=, split it into
 *context* the hooks run in also changed and affects how you write the
 body:
 
-- v1's combined hook ran in two different buffers — the user's
+- v0.1.X combined hook ran in two different buffers — the user's
   original buffer for decrypt (where =buffer-file-name= pointed at the
   encrypted file) and the =*sops-mode-process*-/path= temp buffer for
   encrypt (where =buffer-file-name= was =nil= and the path lived in
@@ -110,7 +110,7 @@ body:
   path in both cases.  Read =buffer-file-name= directly; the
   =sops--original-*= locals are gone.
 
-If your v1 hook handled the encrypt path by reading
+If your v0.1.X hook handled the encrypt path by reading
 =sops--original-buffer-file-name= (or branched on whether
 =buffer-file-name= was =nil=), replace it with a plain
 =buffer-file-name= read — the encrypt-side branch is no longer needed.
