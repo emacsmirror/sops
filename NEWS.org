@@ -15,6 +15,7 @@
 | v0.1.X                                         | v0.2 replacement                                                       |
 |------------------------------------------------+----------------------------------------------------------------------|
 | =sops-before-encrypt-decrypt-hook=             | Split into =sops-before-decrypt-hook= and =sops-before-encrypt-hook= |
+| =sops-decrypt-args=                            | Replaced by =sops-extra-decrypt-args= (drop the leading =\"decrypt\"=) |
 | =sops--sops-version-greater-than-equal-to-3-9= | Removed (sops 3.9+ required, no branching)                           |
 | =sops--status=                                 | Replaced by =sops--state.status= slot                                |
 | =sops--original-buffer-file-name=              | Use =buffer-file-name= — both v0.2 hooks run in the file's own buffer  |

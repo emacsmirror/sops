@@ -970,6 +970,21 @@ buffer's recorded modtime."
                                                (cdr w))))
                         warnings))))
 
+(ert-deftest sops-test--migration-warns-on-v0.1.X-decrypt-args ()
+  "Warns when v0.1.X sops-decrypt-args is non-nil (replaced by
+sops-extra-decrypt-args + hardcoded `decrypt' subcommand)."
+  (let* ((sops-decrypt-args '("decrypt" "--whatever"))
+         (warnings nil)
+         (display-warning-fn
+          (lambda (type msg &rest _) (push (cons type msg) warnings))))
+    (cl-letf (((symbol-function 'display-warning) display-warning-fn))
+      (sops--check-v0.1.X-config))
+    (should (cl-find-if (lambda (w)
+                          (and (eq (car w) 'sops)
+                               (string-match-p "sops-decrypt-args"
+                                               (cdr w))))
+                        warnings))))
+
 (ert-deftest sops-test--migration-no-warn-when-unset ()
   "Does not warn when v0.1.X vars are nil or unbound."
   (let ((warnings nil)
@@ -978,6 +993,9 @@ buffer's recorded modtime."
     (cl-letf (((symbol-function 'display-warning) display-warning-fn))
       (when (boundp 'sops-before-encrypt-decrypt-hook)
         (let ((sops-before-encrypt-decrypt-hook nil))
+          (sops--check-v0.1.X-config)))
+      (when (boundp 'sops-decrypt-args)
+        (let ((sops-decrypt-args nil))
           (sops--check-v0.1.X-config)))
       (sops--check-v0.1.X-config))
     (should (eq nil warnings))))

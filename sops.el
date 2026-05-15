@@ -324,8 +324,14 @@ displayed buffer."
     (display-buffer buf)
     buf))
 
-(defcustom sops-decrypt-args '("decrypt")
-  "Arguments to sops for decrypt (the file path is appended)."
+(defcustom sops-extra-decrypt-args nil
+  "Additional arguments to sops on decrypt.
+Inserted between the `decrypt' subcommand (plus any auto-threaded
+`--input-type'/`--output-type' args) and the trailing file path.
+Example for forcing yaml output:
+\\='(\"--output-type\" \"yaml\").
+
+Mirrors `sops-extra-encrypt-args' in shape and intent."
   :type '(repeat string)
   :group 'sops)
 
@@ -366,8 +372,8 @@ the error hint instead of inferring output-type from input-type).
 
 Returns the pair only when INPUT-TYPE is non-nil and EXISTING-ARGS
 doesn't already contain `--output-type' (so a user who explicitly
-sets one wins).  EXISTING-ARGS is the full args list this call is
-being threaded into (`sops-decrypt-args' for decrypt,
+sets one wins).  EXISTING-ARGS is the user-supplied args list this
+call is being threaded into (`sops-extra-decrypt-args' for decrypt,
 `sops-extra-encrypt-args' for encrypt)."
   (when (and input-type
              (not (member "--output-type" existing-args)))
@@ -380,9 +386,11 @@ Caller must have set `buffer-file-name' to the encrypted file path."
   (run-hooks 'sops-before-decrypt-hook)
   (let* ((file buffer-file-name)
          (input-type (sops--input-type-for file))
-         (args (append sops-decrypt-args
+         (args (append '("decrypt")
                        (when input-type (list "--input-type" input-type))
-                       (sops--maybe-output-type input-type sops-decrypt-args)
+                       (sops--maybe-output-type
+                        input-type sops-extra-decrypt-args)
+                       sops-extra-decrypt-args
                        (list file)))
          (result (sops--run args))
          (exit (plist-get result :exit-status)))
@@ -683,6 +691,13 @@ Use `sops-before-decrypt-hook' and `sops-before-encrypt-hook' instead.
 Kept only as a special variable so v0.1.X configs can be detected at
 `global-sops-mode' activation; see `sops--check-v0.1.X-config'.")
 
+(defvar sops-decrypt-args nil
+  "Removed in v0.2.  Replaced by `sops-extra-decrypt-args' (drop the
+leading \"decrypt\" subcommand; that's now hardcoded in
+`sops--decrypt-buffer').  Kept only as a special variable so v0.1.X
+configs can be detected at `global-sops-mode' activation; see
+`sops--check-v0.1.X-config'.")
+
 (defun sops--check-v0.1.X-config ()
   "Warn the user about removed v0.1.X configuration that's still set."
   (when (and (boundp 'sops-before-encrypt-decrypt-hook)
@@ -691,7 +706,14 @@ Kept only as a special variable so v0.1.X configs can be detected at
      'sops
      (concat "`sops-before-encrypt-decrypt-hook' is removed in v0.2. "
              "Use `sops-before-decrypt-hook' and "
-             "`sops-before-encrypt-hook' instead."))))
+             "`sops-before-encrypt-hook' instead.")))
+  (when (and (boundp 'sops-decrypt-args)
+             (symbol-value 'sops-decrypt-args))
+    (display-warning
+     'sops
+     (concat "`sops-decrypt-args' is replaced in v0.2 by "
+             "`sops-extra-decrypt-args'.  Drop the leading \"decrypt\" "
+             "subcommand and rename."))))
 
 ;;;###autoload
 (define-globalized-minor-mode global-sops-mode
