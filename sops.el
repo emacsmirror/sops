@@ -671,20 +671,20 @@ paths.  Remote support belongs in the separate `tramp-sops' package."
        ;; sops missing or too old: log once, do nothing
        (message "sops: %s" (error-message-string err))))))
 
-;; Declare the removed v1 variable globally special with a nil default.  A
+;; Declare the removed v0.1.X variable globally special with a nil default.  A
 ;; bare `(defvar SYMBOL)' only marks the variable special inside the current
 ;; file's scope, so `let'-bindings of the same name in other files (tests,
 ;; user init) would be lexical and invisible to `symbol-value' here.
-;; Providing a default value makes the symbol globally special; v1 configs
+;; Providing a default value makes the symbol globally special; v0.1.X configs
 ;; setting it to a non-nil value will then trip the warning below.
 (defvar sops-before-encrypt-decrypt-hook nil
   "Removed in v0.2.  Was a single hook fired before both decrypt and encrypt.
 Use `sops-before-decrypt-hook' and `sops-before-encrypt-hook' instead.
-Kept only as a special variable so v1 configs can be detected at
-`global-sops-mode' activation; see `sops--check-v1-config'.")
+Kept only as a special variable so v0.1.X configs can be detected at
+`global-sops-mode' activation; see `sops--check-v0.1.X-config'.")
 
-(defun sops--check-v1-config ()
-  "Warn the user about removed v1 configuration that's still set."
+(defun sops--check-v0.1.X-config ()
+  "Warn the user about removed v0.1.X configuration that's still set."
   (when (and (boundp 'sops-before-encrypt-decrypt-hook)
              (symbol-value 'sops-before-encrypt-decrypt-hook))
     (display-warning
@@ -700,7 +700,7 @@ Kept only as a special variable so v1 configs can be detected at
   :group 'sops
   (if global-sops-mode
       (progn
-        (sops--check-v1-config)
+        (sops--check-v0.1.X-config)
         (add-hook 'find-file-hook #'sops--find-file-hook))
     (remove-hook 'find-file-hook #'sops--find-file-hook)))
 

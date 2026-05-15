@@ -956,14 +956,14 @@ buffer's recorded modtime."
               (kill-buffer buf))))
       (delete-file tmp))))
 
-(ert-deftest sops-test--migration-warns-on-v1-hook ()
-  "Warns when v1 sops-before-encrypt-decrypt-hook is non-nil."
+(ert-deftest sops-test--migration-warns-on-v0.1.X-hook ()
+  "Warns when v0.1.X sops-before-encrypt-decrypt-hook is non-nil."
   (let* ((sops-before-encrypt-decrypt-hook (list #'ignore))
          (warnings nil)
          (display-warning-fn
           (lambda (type msg &rest _) (push (cons type msg) warnings))))
     (cl-letf (((symbol-function 'display-warning) display-warning-fn))
-      (sops--check-v1-config))
+      (sops--check-v0.1.X-config))
     (should (cl-find-if (lambda (w)
                           (and (eq (car w) 'sops)
                                (string-match-p "before-encrypt-decrypt-hook"
@@ -971,15 +971,15 @@ buffer's recorded modtime."
                         warnings))))
 
 (ert-deftest sops-test--migration-no-warn-when-unset ()
-  "Does not warn when v1 vars are nil or unbound."
+  "Does not warn when v0.1.X vars are nil or unbound."
   (let ((warnings nil)
         (display-warning-fn
          (lambda (type msg &rest _) (push (cons type msg) warnings))))
     (cl-letf (((symbol-function 'display-warning) display-warning-fn))
       (when (boundp 'sops-before-encrypt-decrypt-hook)
         (let ((sops-before-encrypt-decrypt-hook nil))
-          (sops--check-v1-config)))
-      (sops--check-v1-config))
+          (sops--check-v0.1.X-config)))
+      (sops--check-v0.1.X-config))
     (should (eq nil warnings))))
 
 (ert-deftest sops-test--encrypt-args-no-trailing-stdin ()
