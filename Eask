@@ -1,6 +1,6 @@
 (package "sops"
          "0.2.0"
-         "SOPS encrypt and decrypt without leaving the editor")
+         "Edit SOPS-encrypted files transparently in Emacs")
 
 (website-url "https://github.com/djgoku/sops")
 (keywords "convenience" "files" "tools")
