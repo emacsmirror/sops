@@ -50,6 +50,11 @@
 (defvar-local sops--state nil
   "An `sops-state' struct for the current buffer, or nil if sops-mode is off.")
 
+(defvar sops--restore-hook-installed nil
+  "Non-nil once the major-mode-change restoration hook is installed.
+Set on first `sops-mode' enable so a bare `(require \\='sops)' adds no
+global hook; see `sops--restore-after-major-mode-change'.")
+
 (defgroup sops nil
   "Edit SOPS-encrypted files transparently."
   :group 'convenience
@@ -582,7 +587,15 @@ Plaintext never reaches disk (backups and auto-save are suppressed)."
     ;; before encrypt would change the ciphertext on every save, producing
     ;; meaningless `git diff' churn even on no-op edits.  apheleia documents
     ;; `apheleia-inhibit' as its buffer-local opt-out.
-    (setq-local apheleia-inhibit t))
+    (setq-local apheleia-inhibit t)
+    ;; Lazy-install the global major-mode-change restoration hook.  Doing
+    ;; this on first `sops-mode' enable rather than at package load keeps
+    ;; `(require \\='sops)' free of global side effects -- users who load
+    ;; sops.el but never visit a SOPS file pay no per-buffer hook cost.
+    (unless sops--restore-hook-installed
+      (add-hook 'after-change-major-mode-hook
+                #'sops--restore-after-major-mode-change)
+      (setq sops--restore-hook-installed t)))
    (t
     (when (buffer-modified-p)
       (setq sops-mode 1)  ; revert the toggle
@@ -615,9 +628,6 @@ function checks for that surviving flag and re-installs the rest."
               #'sops--write-contents-function nil t)
     (auto-revert-mode 1)
     (setq-local apheleia-inhibit t)))
-
-(add-hook 'after-change-major-mode-hook
-          #'sops--restore-after-major-mode-change)
 
 (defun sops--start-creation (format)
   "Seed buffer with FORMAT's stub and enable `sops-mode' in \\='creating state.
