@@ -47,6 +47,9 @@
   status
   last-error)   ; nil or string with most recent sops stderr
 
+(defvar-local sops--state nil
+  "An `sops-state' struct for the current buffer, or nil if sops-mode is off.")
+
 (defgroup sops nil
   "Edit SOPS-encrypted files transparently."
   :group 'convenience
@@ -54,7 +57,7 @@
 
 (defcustom sops-prefilter-regex
   "\\.\\(ya?ml\\|json\\|env\\|ini\\|txt\\)\\'"
-  "Filename regex.  Files matching trigger a `sops filestatus' check on find-file.
+  "Filename regex.  Files matching trigger `sops filestatus' on `find-file'.
 Files not matching are never checked, so their open path is unaffected."
   :type 'regexp
   :group 'sops)
@@ -78,7 +81,7 @@ match wins."
   :group 'sops)
 
 (defun sops--input-type-for (filename)
-  "Return input-type string for FILENAME from `sops-input-type-overrides', or nil.
+  "Return input-type for FILENAME from `sops-input-type-overrides', or nil.
 Pairs in the alist are tried in list order; the first match wins."
   (when filename
     (cdr (cl-find-if (lambda (pair) (string-match-p (car pair) filename))
@@ -98,7 +101,7 @@ example_booleans:
 "
   "YAML stub seeded into new buffers by `sops-find-file'.
 Mirrors upstream sops's `ExampleComplexTree' rendering
-(see `stores/yaml/store.go:EmitExample').")
+\(see `stores/yaml/store.go:EmitExample').")
 
 (defconst sops--example-json
   "{
@@ -117,7 +120,7 @@ Mirrors upstream sops's `ExampleComplexTree' rendering
 "
   "JSON stub seeded into new buffers by `sops-find-file'.
 Mirrors upstream sops's `ExampleComplexTree' rendering
-(see `stores/json/store.go:EmitExample').")
+\(see `stores/json/store.go:EmitExample').")
 
 (defconst sops--example-dotenv
   "# Welcome to SOPS! Edit this file as you please!
@@ -125,7 +128,7 @@ example_key=example_value
 "
   "Dotenv stub seeded into new buffers by `sops-find-file'.
 Mirrors upstream sops's dotenv example rendering
-(see `stores/dotenv/store.go:EmitExample').")
+\(see `stores/dotenv/store.go:EmitExample').")
 
 (defconst sops--example-ini
   "[Welcome!]
@@ -135,7 +138,7 @@ example_key=example_value
 "
   "INI stub seeded into new buffers by `sops-find-file'.
 Mirrors upstream sops's `ExampleSimpleTree' rendering
-(see `stores/ini/store.go:EmitExample').")
+\(see `stores/ini/store.go:EmitExample').")
 
 (defconst sops--example-txt
   "hello from emacs sops-mode!
@@ -170,8 +173,8 @@ returns the empty string."
 
 (defun sops--format-for (filename)
   "Return the `sops--example-for' key for FILENAME, or nil if unknown.
-Standard extensions (\"yaml\"/\"yml\"/\"json\"/\"env\"/\"ini\"/\"txt\") win first
-so a `.txt' file always picks the txt greeting stub, even when the
+Standard extensions (\"yaml\"/\"yml\"/\"json\"/\"env\"/\"ini\"/\"txt\") win
+first so a `.txt' file always picks the txt greeting stub, even when the
 user also has a `sops-input-type-overrides' entry mapping the path
 to a sops parser (e.g. for encrypt to succeed).  For non-standard
 extensions like `.secrets', `sops-input-type-overrides' is the
@@ -211,11 +214,11 @@ plaintext'.  Leading/trailing whitespace in JSON-STRING is trimmed."
   :group 'sops)
 
 (defun sops--run (args &rest keys)
-  "Run sops with ARGS.
+  "Run sops with ARGS.  KEYS is a plist of keyword options.
 Keyword args:
   :input STRING  -- write STRING to a temp file (mode 0600) and pass
                     its path to sops as the trailing argument.  The
-                    temp file is deleted in the unwind-protect cleanup.
+                    temp file is deleted in the `unwind-protect' cleanup.
                     Matches Emacs core's EPG/EPA convention: stdin is
                     reserved for prompt responses; payload bytes go
                     via the file path.
@@ -271,13 +274,13 @@ Signals `user-error' if sops is missing or too old.  Caches result."
   (when (or (null sops--version-cache)
             (not (equal (car sops--version-cache) sops-executable)))
     (unless (executable-find sops-executable)
-      (user-error "sops: executable not found: %s" sops-executable))
+      (user-error "Sops: executable not found: %s" sops-executable))
     (let* ((result (sops--run '("--version")))
            (out (plist-get result :stdout))
            (version (when (string-match "[0-9]+\\.[0-9]+\\.[0-9]+" out)
                       (match-string 0 out))))
       (unless (and version (version<= "3.9.0" version))
-        (user-error "sops: requires >= 3.9.0, found %s"
+        (user-error "Sops: requires >= 3.9.0, found %s"
                     (or version "unknown")))
       (setq sops--version-cache (cons sops-executable version))))
   (cdr sops--version-cache))
@@ -345,8 +348,8 @@ input-file path that `sops--run' appends.  Example for age SSH:
 
 (defcustom sops-before-decrypt-hook nil
   "Hook run before each sops decrypt invocation.
-Runs in the buffer being decrypted; `buffer-file-name' is the
-encrypted file's path.  Use to set `AWS_PROFILE', age key paths, etc.
+Runs in the buffer being decrypted; the variable `buffer-file-name'
+holds the encrypted file's path.  Use to set `AWS_PROFILE', age key paths.
 The hook fires unconditionally before `sops--run', regardless of
 whether the subsequent decrypt succeeds."
   :type 'hook
@@ -354,8 +357,8 @@ whether the subsequent decrypt succeeds."
 
 (defcustom sops-before-encrypt-hook nil
   "Hook run before each sops encrypt invocation.
-Runs in the buffer being encrypted; `buffer-file-name' is the
-target file's path.  Use to set `AWS_PROFILE', age key paths, etc.
+Runs in the buffer being encrypted; the variable `buffer-file-name'
+holds the target file's path.  Use to set `AWS_PROFILE', age key paths.
 The hook fires unconditionally before `sops--run'."
   :type 'hook
   :group 'sops)
@@ -382,7 +385,7 @@ call is being threaded into (`sops-extra-decrypt-args' for decrypt,
 (defun sops--decrypt-buffer ()
   "Decrypt current buffer's file via sops, replacing buffer contents.
 Return t on success, nil on failure (popping an error buffer).
-Caller must have set `buffer-file-name' to the encrypted file path."
+Caller must have set the variable `buffer-file-name' to the encrypted file path."
   (run-hooks 'sops-before-decrypt-hook)
   (let* ((file buffer-file-name)
          (input-type (sops--input-type-for file))
@@ -413,7 +416,7 @@ Caller must have set `buffer-file-name' to the encrypted file path."
       nil)))
 
 (defun sops--encrypt-and-write ()
-  "Encrypt current buffer via sops and write to `buffer-file-name'.
+  "Encrypt current buffer via sops and write to the variable `buffer-file-name'.
 Return t on success.  Signals `user-error' on failure (aborts save).
 
 Reads the full buffer (widened) so a narrowed buffer isn't silently
@@ -449,10 +452,10 @@ subsequent saves and reverts follow the normal v0.2 paths."
     (cond
      ((not (eq 0 exit))
       (sops--popup-error file args exit (plist-get result :stderr))
-      (user-error "sops encrypt failed (exit %d)" exit))
+      (user-error "Sops encrypt failed (exit %d)" exit))
      ((zerop (length stdout))
       (sops--popup-error file args exit "sops: encrypt produced empty output\n")
-      (user-error "sops encrypt produced empty output")))
+      (user-error "Sops encrypt produced empty output")))
     (let ((coding-system-for-write 'no-conversion)
           (make-backup-files nil))
       (write-region stdout nil file nil 'silent))
@@ -466,12 +469,10 @@ subsequent saves and reverts follow the normal v0.2 paths."
       (setf (sops-state-status sops--state) 'decrypted))
     t))
 
-(defvar-local sops--state nil
-  "An `sops-state' struct for the current buffer, or nil if sops-mode is off.")
-
 (defun sops--write-contents-function ()
   "Hook function for `write-contents-functions'.
-Returns t when save was handled (skipping normal write); signals user-error on fail."
+Returns t when save was handled (skipping normal write).
+Signals `user-error' on save failure."
   (sops--encrypt-and-write))
 
 (defun sops--retry-decrypt-on-revert (&rest _args)
@@ -480,7 +481,7 @@ Installed in `sops--find-file-hook' when the first `sops--decrypt-buffer'
 call exits non-zero -- without this hook, `revert-buffer' would fall
 through to the default implementation which just re-reads the encrypted
 bytes and never re-invokes sops, so the recovery hint printed into
-`*sops-error:*' (\"fix auth, then M-x revert-buffer\") would be a lie.
+`*sops-error:*' (\"fix auth, then \\[revert-buffer]\") would be a lie.
 
 Re-reads the encrypted file from disk (in case the user also fixed
 things externally) and re-runs `sops--decrypt-buffer'.  On success,
@@ -519,7 +520,7 @@ Refreshes `visited-file-modtime' BEFORE `erase-buffer'.  Two reasons:
      so the next keystroke doesn't re-fire the \"FILE has changed on
      disk\" prompt.
 
-  2. `erase-buffer' triggers Emacs's lock-file path which calls
+  2. `erase-buffer' triggers Emacs's `lock-file' path which calls
      `ask-user-about-supersession-threat' if the modtime is stale.
      In batch mode that errors out (\"Cannot resolve conflict in
      batch mode\"); interactively it would re-fire the supersession
@@ -537,7 +538,7 @@ Refreshes `visited-file-modtime' BEFORE `erase-buffer'.  Two reasons:
 ;;;###autoload
 (define-minor-mode sops-mode
   "Edit the current SOPS-encrypted file transparently.
-Decryption happens at find-file; encryption happens at save-buffer.
+Decryption happens at `find-file'; encryption happens at `save-buffer'.
 Plaintext never reaches disk (backups and auto-save are suppressed)."
   :init-value nil
   :lighter " sops"
@@ -586,7 +587,7 @@ Plaintext never reaches disk (backups and auto-save are suppressed)."
     (when (buffer-modified-p)
       (setq sops-mode 1)  ; revert the toggle
       (user-error
-       "sops: buffer modified; revert-buffer first or use M-x read-only-mode"))
+       "Sops: buffer modified; revert-buffer first or use M-x read-only-mode"))
     (auto-revert-mode -1)
     (kill-local-variable 'make-backup-files)
     (kill-local-variable 'buffer-auto-save-file-name)
@@ -619,20 +620,20 @@ function checks for that surviving flag and re-installs the rest."
           #'sops--restore-after-major-mode-change)
 
 (defun sops--start-creation (format)
-  "Seed current buffer with FORMAT's stub and enable `sops-mode' in 'creating state.
+  "Seed buffer with FORMAT's stub and enable `sops-mode' in \\='creating state.
 FORMAT is a sops type name; see `sops--example-for' for accepted values.
 
-`buffer-file-name' must already be set (caller has typically just
-called `find-file' on a non-existent path).  This helper:
+The variable `buffer-file-name' must already be set (caller has typically
+just called `find-file' on a non-existent path).  This helper:
 
   1. Erases the buffer and inserts the matching stub.
   2. Marks the buffer unmodified -- the example is not user edits.
-  3. Pre-sets `sops--state' to `'creating' so the `sops-mode' enable
+  3. Pre-sets `sops--state' to \\='creating so the `sops-mode' enable
      guard skips its filestatus check (the file doesn't exist yet).
   4. Enables `sops-mode'.
 
 On first successful save, `sops--encrypt-and-write' will transition
-`sops--state.status' from `'creating' to `'decrypted'."
+`sops--state.status' from \\='creating to \\='decrypted."
   (let ((stub (sops--example-for format)))
     (erase-buffer)
     (insert stub))
@@ -694,11 +695,11 @@ Kept only as a special variable so v0.1.X configs can be detected at
 `global-sops-mode' activation; see `sops--check-v0.1.X-config'.")
 
 (defvar sops-decrypt-args nil
-  "Removed in v0.2.  Replaced by `sops-extra-decrypt-args' (drop the
-leading \"decrypt\" subcommand; that's now hardcoded in
-`sops--decrypt-buffer').  Kept only as a special variable so v0.1.X
-configs can be detected at `global-sops-mode' activation; see
-`sops--check-v0.1.X-config'.")
+  "Removed in v0.2.  Replaced by `sops-extra-decrypt-args'.
+Drop the leading \"decrypt\" subcommand from any prior value; that
+subcommand is now hardcoded in `sops--decrypt-buffer'.  Kept only as
+a special variable so v0.1.X configs can be detected at
+`global-sops-mode' activation; see `sops--check-v0.1.X-config'.")
 
 (defun sops--check-v0.1.X-config ()
   "Warn the user about removed v0.1.X configuration that's still set."
@@ -747,28 +748,28 @@ created if:
 Otherwise visits PATH (which creates an empty buffer with no file on
 disk yet), seeds it with a format-appropriate SOPS example -- ported
 from upstream sops's `EmitExample' -- and enables `sops-mode' in
-`'creating' state.  On the first successful `save-buffer', sops
+\\='creating state.  On the first successful `save-buffer', sops
 encrypts the buffer's contents to PATH and the buffer transitions
-to the normal `'decrypted' state.
+to the normal \\='decrypted state.
 
 Interactive: prompts via `read-file-name'."
   (interactive (list (read-file-name "Find SOPS file: ")))
   (when (string-empty-p path)
-    (user-error "sops-find-file: not a file path: %s" path))
+    (user-error "Sops-find-file: not a file path: %s" path))
   (let ((path (expand-file-name path)))
     (when (directory-name-p path)
-      (user-error "sops-find-file: not a file path: %s" path))
+      (user-error "Sops-find-file: not a file path: %s" path))
     (when (file-remote-p path)
-      (user-error "sops-find-file: remote paths not supported: %s" path))
+      (user-error "Sops-find-file: remote paths not supported: %s" path))
     (if (file-exists-p path)
         (find-file path)
       (let ((parent (file-name-directory path)))
         (unless (and parent (file-exists-p parent))
-          (user-error "sops-find-file: parent directory does not exist: %s"
+          (user-error "Sops-find-file: parent directory does not exist: %s"
                       parent))
         (unless (locate-dominating-file parent ".sops.yaml")
           (user-error
-           "sops-find-file: no .sops.yaml found in any ancestor of %s"
+           "Sops-find-file: no .sops.yaml found in any ancestor of %s"
            parent))
         (sops--ensure-version)
         (let ((format (sops--format-for path)))
